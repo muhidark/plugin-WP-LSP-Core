@@ -63,6 +63,8 @@ class LSP_Core_Management {
         add_filter( 'ajax_query_attachments_args', array( $this, 'restrict_asesor_media_library' ) );
         // Notifikasi di Admin jika ada artikel Asesor yang menunggu persetujuan (Pending Review)
         add_action( 'admin_notices', array( $this, 'pending_asesor_posts_notice' ) );
+        // Notifikasi Validasi & Pencegahan Duplikasi Data Sertifikat
+        add_action( 'admin_notices', array( $this, 'display_cert_admin_notices' ) );
 
         // 5. Query Filter untuk Archive Skema (/skema/)
         add_action( 'pre_get_posts', array( $this, 'skema_archive_query' ) );
@@ -777,26 +779,256 @@ class LSP_Core_Management {
         <?php
     }
 
+    /**
+     * Normalisasi Nomor Identitas Sertifikat (Kode Blanko / No. Registrasi)
+     * Membersihkan spasi tak sengaja dan karakter kontrol tanpa merusak tanda baca resmi.
+     */
+    public static function normalize_cert_number( $number ) {
+        if ( ! is_scalar( $number ) ) {
+            return '';
+        }
+        // Hapus karakter kontrol dan non-breaking space (U+00A0)
+        $clean = preg_replace( '/[\x00-\x1F\x7F\xC2\xA0]/u', ' ', (string) $number );
+        $clean = sanitize_text_field( $clean );
+        // Satukan spasi berurutan dan hapus spasi di awal/akhir
+        return trim( preg_replace( '/\s+/', ' ', $clean ) );
+    }
+
+    /**
+     * Tampilkan Notifikasi Validasi & Error Duplikasi pada WP-Admin
+     */
+    public function display_cert_admin_notices() {
+        $user_id = get_current_user_id();
+        if ( ! $user_id ) return;
+
+        $errors = get_transient( 'lsp_cert_save_errors_' . $user_id );
+        if ( ! empty( $errors ) && is_array( $errors ) ) {
+            delete_transient( 'lsp_cert_save_errors_' . $user_id );
+            ?>
+            <div class="notice notice-error is-dismissible" style="border-left-width: 4px; border-left-color: #dc2626;">
+                <p><strong>⚠️ Gagal Menyimpan Data Sertifikat:</strong></p>
+                <ul style="list-style: disc; margin-left: 25px; margin-top: 5px;">
+                    <?php foreach ( $errors as $err ) : ?>
+                        <li><?php echo wp_kses_post( $err ); ?></li>
+                    <?php endforeach; ?>
+                </ul>
+                <p style="font-size: 12px; color: #64748b; margin-top: 5px;">Data lama pada database tetap dipertahankan dan tidak mengalami perubahan.</p>
+            </div>
+            <?php
+        }
+    }
+
     public function save_cert_meta( $post_id ) {
-        if ( ! isset( $_POST['lsp_cert_meta_nonce'] ) ) return;
-        if ( ! wp_verify_nonce( $_POST['lsp_cert_meta_nonce'], 'lsp_cert_meta_nonce_action' ) ) return;
-        if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
-        if ( ! current_user_can( 'edit_post', $post_id ) ) return;
+        // 1. Verifikasi Nonce
+        if ( ! isset( $_POST['lsp_cert_meta_nonce'] ) || ! wp_verify_nonce( $_POST['lsp_cert_meta_nonce'], 'lsp_cert_meta_nonce_action' ) ) {
+            return;
+        }
 
-        $kode_blanko    = isset( $_POST['kode_blanko'] ) ? sanitize_text_field( trim( $_POST['kode_blanko'] ) ) : '';
-        $nama_pemegang  = isset( $_POST['nama_pemegang'] ) ? sanitize_text_field( trim( $_POST['nama_pemegang'] ) ) : '';
-        $no_registrasi  = isset( $_POST['no_registrasi'] ) ? sanitize_text_field( trim( $_POST['no_registrasi'] ) ) : '';
-        $skema          = isset( $_POST['skema_sertifikasi'] ) ? sanitize_text_field( trim( $_POST['skema_sertifikasi'] ) ) : '';
-        $tanggal_terbit = isset( $_POST['tanggal_terbit'] ) ? sanitize_text_field( trim( $_POST['tanggal_terbit'] ) ) : '';
+        // 2. Proteksi Autosave & Revisi
+        if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+            return;
+        }
+        if ( wp_is_post_autosave( $post_id ) || wp_is_post_revision( $post_id ) ) {
+            return;
+        }
 
+        // 3. Verifikasi Tipe Postingan
+        if ( 'data_sertifikat' !== get_post_type( $post_id ) ) {
+            return;
+        }
+
+        // 4. Verifikasi Hak Akses Pengguna (Capabilities)
+        if ( ! current_user_can( 'edit_post', $post_id ) ) {
+            return;
+        }
+
+        // 5. Sanitasi & Normalisasi Input
+        $raw_blanko = isset( $_POST['kode_blanko'] ) ? wp_unslash( $_POST['kode_blanko'] ) : '';
+        $raw_nama   = isset( $_POST['nama_pemegang'] ) ? wp_unslash( $_POST['nama_pemegang'] ) : '';
+        $raw_reg    = isset( $_POST['no_registrasi'] ) ? wp_unslash( $_POST['no_registrasi'] ) : '';
+        $raw_skema  = isset( $_POST['skema_sertifikasi'] ) ? wp_unslash( $_POST['skema_sertifikasi'] ) : '';
+        $raw_tgl    = isset( $_POST['tanggal_terbit'] ) ? wp_unslash( $_POST['tanggal_terbit'] ) : '';
+
+        $kode_blanko    = self::normalize_cert_number( $raw_blanko );
+        $no_registrasi  = self::normalize_cert_number( $raw_reg );
+        $nama_pemegang  = sanitize_text_field( trim( $raw_nama ) );
+        $skema          = sanitize_text_field( trim( $raw_skema ) );
+        $tanggal_terbit = sanitize_text_field( trim( $raw_tgl ) );
+
+        $errors = array();
+
+        // 6. Validasi Input Wajib & Batasan Panjang Karakter
+        if ( '' === $kode_blanko ) {
+            $errors[] = __( 'Nomor / Kode Blanko Sertifikat wajib diisi.', 'lsp-core-management' );
+        } elseif ( mb_strlen( $kode_blanko, 'UTF-8' ) < 3 || mb_strlen( $kode_blanko, 'UTF-8' ) > 60 ) {
+            $errors[] = __( 'Panjang Kode Blanko harus antara 3 hingga 60 karakter.', 'lsp-core-management' );
+        }
+
+        if ( '' === $no_registrasi ) {
+            $errors[] = __( 'Nomor Registrasi Sertifikat wajib diisi.', 'lsp-core-management' );
+        } elseif ( mb_strlen( $no_registrasi, 'UTF-8' ) < 3 || mb_strlen( $no_registrasi, 'UTF-8' ) > 60 ) {
+            $errors[] = __( 'Panjang Nomor Registrasi harus antara 3 hingga 60 karakter.', 'lsp-core-management' );
+        }
+
+        if ( '' === $nama_pemegang ) {
+            $errors[] = __( 'Nama Lengkap Pemegang Sertifikat (Asesi) wajib diisi.', 'lsp-core-management' );
+        }
+
+        if ( '' === $skema ) {
+            $errors[] = __( 'Skema Sertifikasi wajib diisi.', 'lsp-core-management' );
+        }
+
+        // 7. Validasi Format & Keabsahan Tanggal Terbit (YYYY-MM-DD)
+        if ( '' === $tanggal_terbit ) {
+            $errors[] = __( 'Tanggal Terbit Sertifikat wajib diisi.', 'lsp-core-management' );
+        } else {
+            $d = DateTime::createFromFormat( 'Y-m-d', $tanggal_terbit );
+            if ( ! $d || $d->format( 'Y-m-d' ) !== $tanggal_terbit ) {
+                $errors[] = __( 'Format Tanggal Terbit tidak valid. Gunakan format YYYY-MM-DD (contoh: 2024-05-15).', 'lsp-core-management' );
+            }
+        }
+
+        // 8. Deteksi Duplikasi Identitas (Mengecualikan post saat ini)
+        // A. Keunikan Kode Blanko
+        if ( '' !== $kode_blanko ) {
+            $conflict_blanko = new WP_Query( array(
+                'post_type'              => 'data_sertifikat',
+                'post_status'            => 'any',
+                'post__not_in'           => array( $post_id ),
+                'posts_per_page'         => 1,
+                'fields'                 => 'ids',
+                'no_found_rows'          => true,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+                'meta_query'             => array(
+                    array(
+                        'key'     => 'kode_blanko',
+                        'value'   => $kode_blanko,
+                        'compare' => '=',
+                    ),
+                ),
+            ) );
+            if ( ! empty( $conflict_blanko->posts ) ) {
+                $other_id = $conflict_blanko->posts[0];
+                $errors[] = sprintf(
+                    __( 'Nomor Blanko <strong>"%s"</strong> sudah terdaftar pada sertifikat lain (ID Post: %d — "%s"). Nomor blanko fisik harus unik.', 'lsp-core-management' ),
+                    esc_html( $kode_blanko ),
+                    $other_id,
+                    esc_html( get_the_title( $other_id ) )
+                );
+            }
+        }
+
+        // B. Keunikan Nomor Registrasi
+        if ( '' !== $no_registrasi ) {
+            $conflict_reg = new WP_Query( array(
+                'post_type'              => 'data_sertifikat',
+                'post_status'            => 'any',
+                'post__not_in'           => array( $post_id ),
+                'posts_per_page'         => 1,
+                'fields'                 => 'ids',
+                'no_found_rows'          => true,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+                'meta_query'             => array(
+                    array(
+                        'key'     => 'no_registrasi',
+                        'value'   => $no_registrasi,
+                        'compare' => '=',
+                    ),
+                ),
+            ) );
+            if ( ! empty( $conflict_reg->posts ) ) {
+                $other_id = $conflict_reg->posts[0];
+                $errors[] = sprintf(
+                    __( 'Nomor Registrasi <strong>"%s"</strong> sudah terdaftar pada sertifikat lain (ID Post: %d — "%s"). Nomor registrasi harus unik.', 'lsp-core-management' ),
+                    esc_html( $no_registrasi ),
+                    $other_id,
+                    esc_html( get_the_title( $other_id ) )
+                );
+            }
+        }
+
+        // C. Pengecekan Duplikasi Lintas Metadata (Cross-Field Collision)
+        if ( '' !== $kode_blanko ) {
+            $cross_1 = new WP_Query( array(
+                'post_type'              => 'data_sertifikat',
+                'post_status'            => 'any',
+                'post__not_in'           => array( $post_id ),
+                'posts_per_page'         => 1,
+                'fields'                 => 'ids',
+                'no_found_rows'          => true,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+                'meta_query'             => array(
+                    array(
+                        'key'     => 'no_registrasi',
+                        'value'   => $kode_blanko,
+                        'compare' => '=',
+                    ),
+                ),
+            ) );
+            if ( ! empty( $cross_1->posts ) ) {
+                $other_id = $cross_1->posts[0];
+                $errors[] = sprintf(
+                    __( 'Nomor Blanko <strong>"%s"</strong> bertabrakan dengan Nomor Registrasi pada sertifikat lain (ID Post: %d — "%s"). Identitas sertifikat tidak boleh bentrok antar-kolom.', 'lsp-core-management' ),
+                    esc_html( $kode_blanko ),
+                    $other_id,
+                    esc_html( get_the_title( $other_id ) )
+                );
+            }
+        }
+
+        if ( '' !== $no_registrasi ) {
+            $cross_2 = new WP_Query( array(
+                'post_type'              => 'data_sertifikat',
+                'post_status'            => 'any',
+                'post__not_in'           => array( $post_id ),
+                'posts_per_page'         => 1,
+                'fields'                 => 'ids',
+                'no_found_rows'          => true,
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+                'meta_query'             => array(
+                    array(
+                        'key'     => 'kode_blanko',
+                        'value'   => $no_registrasi,
+                        'compare' => '=',
+                    ),
+                ),
+            ) );
+            if ( ! empty( $cross_2->posts ) ) {
+                $other_id = $cross_2->posts[0];
+                $errors[] = sprintf(
+                    __( 'Nomor Registrasi <strong>"%s"</strong> bertabrakan dengan Nomor Blanko pada sertifikat lain (ID Post: %d — "%s"). Identitas sertifikat tidak boleh bentrok antar-kolom.', 'lsp-core-management' ),
+                    esc_html( $no_registrasi ),
+                    $other_id,
+                    esc_html( get_the_title( $other_id ) )
+                );
+            }
+        }
+
+        // 9. Eksekusi Penyimpanan atau Pencegahan Konflik
+        if ( ! empty( $errors ) ) {
+            // TERJADI KONFLIK ATAU VALIDASI GAGAL:
+            // - Jangan menimpa sertifikat lain.
+            // - Jangan menghapus data lama.
+            // - Pertahankan metadata lama.
+            // - Simpan notifikasi error untuk ditampilkan ke admin.
+            set_transient( 'lsp_cert_save_errors_' . get_current_user_id(), $errors, 45 );
+            return;
+        }
+
+        // VALIDASI BERHASIL: Simpan metadata baru
         update_post_meta( $post_id, 'kode_blanko', $kode_blanko );
         update_post_meta( $post_id, 'nama_pemegang', $nama_pemegang );
         update_post_meta( $post_id, 'no_registrasi', $no_registrasi );
         update_post_meta( $post_id, 'skema_sertifikasi', $skema );
         update_post_meta( $post_id, 'tanggal_terbit', $tanggal_terbit );
 
-        if ( ! empty( $kode_blanko ) && ! empty( $nama_pemegang ) ) {
-            $auto_title = $kode_blanko . ' - ' . $nama_pemegang;
+        // Update post title otomatis: "KODE_BLANKO - NAMA_PEMEGANG"
+        $auto_title = $kode_blanko . ' - ' . $nama_pemegang;
+        if ( get_the_title( $post_id ) !== $auto_title ) {
             remove_action( 'save_post_data_sertifikat', array( $this, 'save_cert_meta' ) );
             wp_update_post( array(
                 'ID'         => $post_id,
@@ -2695,12 +2927,9 @@ class LSP_Core_Management {
         }
         set_transient( $rate_key, $attempts + 1, 60 );
 
-        // 3. Sanitasi & Normalisasi Input
+        // 3. Sanitasi & Normalisasi Input Menggunakan Fungsi Sentral
         $raw_input = isset( $_POST['kode_blanko'] ) ? wp_unslash( $_POST['kode_blanko'] ) : '';
-        // Bersihkan karakter kontrol dan spasi tak kasat mata
-        $cleaned   = preg_replace( '/[\x00-\x1F\x7F\xC2\xA0]/u', ' ', (string) $raw_input );
-        $cleaned   = sanitize_text_field( $cleaned );
-        $kode_cert = trim( preg_replace( '/\s+/', ' ', $cleaned ) );
+        $kode_cert = self::normalize_cert_number( $raw_input );
 
         // Validasi input kosong
         if ( '' === $kode_cert ) {

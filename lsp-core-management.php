@@ -65,6 +65,7 @@ class LSP_Core_Management {
         add_action( 'admin_notices', array( $this, 'pending_asesor_posts_notice' ) );
         // Notifikasi Validasi & Pencegahan Duplikasi Data Sertifikat
         add_action( 'admin_notices', array( $this, 'display_cert_admin_notices' ) );
+        add_filter( 'redirect_post_location', array( $this, 'filter_cert_save_redirect_location' ), 10, 2 );
 
         // 5. Query Filter untuk Archive Skema (/skema/)
         add_action( 'pre_get_posts', array( $this, 'skema_archive_query' ) );
@@ -781,17 +782,19 @@ class LSP_Core_Management {
 
     /**
      * Normalisasi Nomor Identitas Sertifikat (Kode Blanko / No. Registrasi)
-     * Membersihkan spasi tak sengaja dan karakter kontrol tanpa merusak tanda baca resmi.
+     * Membersihkan seluruh variasi whitespace Unicode (\p{Z}) dan karakter kontrol (\p{C})
+     * tanpa merusak tanda baca resmi (. / - _).
      */
     public static function normalize_cert_number( $number ) {
         if ( ! is_scalar( $number ) ) {
             return '';
         }
-        // Hapus karakter kontrol dan non-breaking space (U+00A0)
-        $clean = preg_replace( '/[\x00-\x1F\x7F\xC2\xA0]/u', ' ', (string) $number );
+        // 1. Hapus seluruh karakter kontrol Unicode (Cc, Cf, Cs, Co, Cn)
+        $clean = preg_replace( '/\p{C}+/u', '', (string) $number );
+        // 2. Satukan seluruh variasi Unicode whitespace (\p{Z}) dan whitespace standar (\s) menjadi spasi ASCII tunggal
+        $clean = preg_replace( '/[\p{Z}\s]+/u', ' ', $clean );
         $clean = sanitize_text_field( $clean );
-        // Satukan spasi berurutan dan hapus spasi di awal/akhir
-        return trim( preg_replace( '/\s+/', ' ', $clean ) );
+        return trim( $clean );
     }
 
     /**
@@ -816,6 +819,20 @@ class LSP_Core_Management {
             </div>
             <?php
         }
+    }
+
+    /**
+     * Hapus parameter message default WordPress ("Post updated / published")
+     * jika terjadi error validasi saat simpan sertifikat
+     */
+    public function filter_cert_save_redirect_location( $location, $post_id ) {
+        if ( 'data_sertifikat' === get_post_type( $post_id ) ) {
+            $user_id = get_current_user_id();
+            if ( $user_id && get_transient( 'lsp_cert_save_errors_' . $user_id ) ) {
+                return remove_query_arg( 'message', $location );
+            }
+        }
+        return $location;
     }
 
     public function save_cert_meta( $post_id ) {
@@ -1016,6 +1033,25 @@ class LSP_Core_Management {
             // - Pertahankan metadata lama.
             // - Simpan notifikasi error untuk ditampilkan ke admin.
             set_transient( 'lsp_cert_save_errors_' . get_current_user_id(), $errors, 45 );
+
+            // Sinkronisasi status & judul post:
+            // Jangan biarkan sertifikat yang gagal validasi terbit (publish) dalam kondisi data cacat/duplikat
+            $old_blanko = get_post_meta( $post_id, 'kode_blanko', true );
+            $old_nama   = get_post_meta( $post_id, 'nama_pemegang', true );
+
+            remove_action( 'save_post_data_sertifikat', array( $this, 'save_cert_meta' ) );
+            $revert_data = array( 'ID' => $post_id );
+            // Jika record baru atau belum pernah punya blanko yang valid, paksa kembali ke status 'draft'
+            if ( empty( $old_blanko ) ) {
+                $revert_data['post_status'] = 'draft';
+            }
+            // Kembalikan judul post ke data lama yang valid jika ada
+            if ( ! empty( $old_blanko ) && ! empty( $old_nama ) ) {
+                $revert_data['post_title'] = $old_blanko . ' - ' . $old_nama;
+            }
+            wp_update_post( $revert_data );
+            add_action( 'save_post_data_sertifikat', array( $this, 'save_cert_meta' ) );
+
             return;
         }
 

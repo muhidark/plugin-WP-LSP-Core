@@ -211,3 +211,4 @@ Setelah keberhasilan stabilisasi Phase 2, tahapan berikutnya yang direkomendasik
    - Menambahkan deteksi duplikasi pra-impor (*pre-flight validation*) sehingga baris CSV yang memiliki duplikasi nomor di database atau di dalam file CSV itu sendiri dilaporkan ke admin sebelum dimasukkan ke database.
 3. **Phase 5: Status Siklus Hidup Sertifikat:**
    - Menyediakan status operasional resmi sertifikat (Tercetak, Diserahkan, Aktif, Kadaluarsa, Dicabut/Suspended).
+

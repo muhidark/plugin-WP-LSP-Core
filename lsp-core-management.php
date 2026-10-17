@@ -2557,12 +2557,30 @@ class LSP_Core_Management {
                     }
                 } elseif ( ! empty( $db_blanko ) && empty( $db_reg ) ) {
                     $target_id = $db_blanko[0];
+                    $cur_reg   = get_post_meta( $target_id, 'no_registrasi', true );
+                    if ( '' !== $cur_reg && $cur_reg !== $reg ) {
+                        // Tolak perubahan identitas nomor registrasi otomatis jika record sudah memiliki nomor registrasi berbeda
+                        $row_errors[] = sprintf(
+                            __( 'Perubahan identitas ditolak: Sertifikat ID %d sudah memiliki Nomor Registrasi "%s" yang berbeda di database. Perubahan identitas nomor sertifikat harus dilakukan manual.', 'lsp-core-management' ),
+                            $target_id,
+                            esc_html( $cur_reg )
+                        );
+                    }
                     if ( ! empty( $x_reg ) && ! in_array( $target_id, $x_reg, true ) ) {
                         $row_errors[] = sprintf( __( 'Tabrakan lintas kolom: Nomor Registrasi "%s" bertabrakan dengan Nomor Blanko pada sertifikat ID %d di database.', 'lsp-core-management' ), $reg, $x_reg[0] );
                     }
                     $action = 'UPDATE';
                 } elseif ( empty( $db_blanko ) && ! empty( $db_reg ) ) {
                     $target_id = $db_reg[0];
+                    $cur_blanko = get_post_meta( $target_id, 'kode_blanko', true );
+                    if ( '' !== $cur_blanko && $cur_blanko !== $blanko ) {
+                        // Tolak perubahan identitas kode blanko otomatis jika record sudah memiliki nomor blanko berbeda
+                        $row_errors[] = sprintf(
+                            __( 'Perubahan identitas ditolak: Sertifikat ID %d sudah memiliki Nomor Blanko "%s" yang berbeda di database. Perubahan identitas nomor sertifikat harus dilakukan manual.', 'lsp-core-management' ),
+                            $target_id,
+                            esc_html( $cur_blanko )
+                        );
+                    }
                     if ( ! empty( $x_blanko ) && ! in_array( $target_id, $x_blanko, true ) ) {
                         $row_errors[] = sprintf( __( 'Tabrakan lintas kolom: Nomor Blanko "%s" bertabrakan dengan Nomor Registrasi pada sertifikat ID %d di database.', 'lsp-core-management' ), $blanko, $x_blanko[0] );
                     }
@@ -2648,6 +2666,23 @@ class LSP_Core_Management {
             $auto_title = $blanko . ' - ' . $nama;
 
             if ( 'INSERT' === $action ) {
+                // Validasi ulang terhadap database secara realtime tepat sebelum insert
+                // Mencegah race condition jika ada sertifikat baru yang ditambahkan di DB setelah preview
+                $recheck_b  = self::find_certs_by_meta( 'kode_blanko', $blanko );
+                $recheck_r  = self::find_certs_by_meta( 'no_registrasi', $reg );
+                $recheck_x1 = self::find_certs_by_meta( 'no_registrasi', $blanko );
+                $recheck_x2 = self::find_certs_by_meta( 'kode_blanko', $reg );
+
+                if ( ! empty( $recheck_b ) || ! empty( $recheck_r ) || ! empty( $recheck_x1 ) || ! empty( $recheck_x2 ) ) {
+                    $failed++;
+                    $failed_details[] = array(
+                        'row'   => $row['row_num'],
+                        'field' => 'conflict_post_preview',
+                        'error' => __( 'Konflik database pasca-pratinjau: Nomor sertifikat telah didaftarkan di pangkalan data oleh proses lain sebelum konfirmasi eksekusi.', 'lsp-core-management' ),
+                    );
+                    continue;
+                }
+
                 $post_id = wp_insert_post( array(
                     'post_type'   => 'data_sertifikat',
                     'post_title'  => $auto_title,
@@ -2673,12 +2708,12 @@ class LSP_Core_Management {
                 $imported++;
             } elseif ( 'UPDATE' === $action ) {
                 $target_id = isset( $row['target_id'] ) ? intval( $row['target_id'] ) : 0;
-                if ( $target_id <= 0 ) {
+                if ( $target_id <= 0 || 'data_sertifikat' !== get_post_type( $target_id ) ) {
                     $failed++;
                     $failed_details[] = array(
                         'row'   => $row['row_num'],
                         'field' => 'database_update',
-                        'error' => __( 'Target ID sertifikat untuk pembaruan tidak valid.', 'lsp-core-management' ),
+                        'error' => __( 'Target ID sertifikat untuk pembaruan tidak valid atau telah dihapus.', 'lsp-core-management' ),
                     );
                     continue;
                 }

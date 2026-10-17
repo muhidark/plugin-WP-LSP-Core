@@ -218,3 +218,4 @@ Setelah modul CSV Import tuntas diperkuat dan seluruh alur identitas sertifikat 
    Memindahkan eksekusi `add_cap()` dan `remove_cap()` dari hook `init` ke activation hook plugin guna menghentikan penulisan serialized options pada setiap web request.
 2. **Siklus Hidup Status Sertifikat:**
    Menambahkan status operasional sertifikat resmi (Tercetak, Diserahkan, Aktif, Kadaluarsa, Dicabut).
+

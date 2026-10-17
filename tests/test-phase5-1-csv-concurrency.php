@@ -71,20 +71,22 @@ function create_dummy_batch( $token, $user_id = 1, $num_rows = 2 ) {
     return $rows;
 }
 
-// 1. Dua konfirmasi import bersamaan (Race condition: eksekusi 1 menghapus transient, eksekusi 2 ditolak)
-run_concurrency_test( 'TEST 01: Dua konfirmasi import bersamaan (Double Submit Prevention via Instant Delete)', function() use ( $plugin, $wpdb ) {
+// 1. Dua konfirmasi import bersamaan (Race condition: atomic claim via claim_batch_transient)
+run_concurrency_test( 'TEST 01: Dua konfirmasi import bersamaan (Double Submit Prevention via Atomic Claim)', function() use ( $plugin, $wpdb ) {
     $token = wp_generate_password( 24, false );
     $batch = create_dummy_batch( $token, 1, 2 );
 
-    // Request pertama: membaca transient dan langsung menghapusnya
     $transient_key = 'lsp_csv_batch_1_' . $token;
-    $batch_1 = get_transient( $transient_key );
-    delete_transient( $transient_key ); // Atomik hapus seketika pada pembacaan pertama
 
-    $res_1 = $plugin->execute_csv_import_batch( $batch_1 );
+    // Request 1 mengklaim batch menggunakan claim_batch_transient()
+    $batch_1 = $plugin->claim_batch_transient( $transient_key );
+    $res_1 = false;
+    if ( false !== $batch_1 ) {
+        $res_1 = $plugin->execute_csv_import_batch( $batch_1 );
+    }
 
-    // Request kedua (bersamaan / replay): mencoba membaca transient yang sama
-    $batch_2 = get_transient( $transient_key );
+    // Request 2 (bersamaan / replay) mencoba mengklaim batch yang sama
+    $batch_2 = $plugin->claim_batch_transient( $transient_key );
     $res_2 = false;
     if ( false !== $batch_2 ) {
         $res_2 = $plugin->execute_csv_import_batch( $batch_2 );
@@ -236,3 +238,4 @@ if ( $passed === $total ) {
     echo "STATUS: TERDAPAT KEGAGALAN CSV CONCURRENCY & REPLAY!\n";
     exit( 1 );
 }
+

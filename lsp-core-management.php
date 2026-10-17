@@ -2838,6 +2838,41 @@ class LSP_Core_Management {
     }
 
     /**
+     * Klaim Batch CSV secara Atomik untuk Mencegah Race Condition / Concurrency Replay
+     *
+     * Menggunakan mekanisme atomic lock berbasis WordPress options (MySQL UNIQUE constraint)
+     * sehingga dari beberapa request paralel, HANYA TEPAT SATU request yang dapat mengklaim batch.
+     *
+     * @param string $trans_key Kunci transient batch
+     * @return array|false Data baris batch jika klaim berhasil, false jika gagal / sudah diklaim
+     */
+    public static function claim_batch_transient( $trans_key ) {
+        if ( empty( $trans_key ) || ! is_string( $trans_key ) ) {
+            return false;
+        }
+
+        $lock_key = 'lsp_lock_' . md5( $trans_key );
+
+        // 1. Dapatkan atomic lock via add_option() (MySQL UNIQUE constraint pada wp_options.option_name)
+        // Jika request paralel lain sudah melakukan insert, add_option() akan mengembalikan false.
+        $acquired = add_option( $lock_key, time(), '', 'no' );
+        if ( ! $acquired ) {
+            return false;
+        }
+
+        // 2. Ambil data batch dari transient
+        $batch_rows = get_transient( $trans_key );
+
+        // 3. Langsung hapus transient seketika agar tidak dapat dibaca lagi
+        delete_transient( $trans_key );
+
+        // 4. Lepaskan lock setelah transient dipastikan terhapus
+        delete_option( $lock_key );
+
+        return ( false !== $batch_rows && is_array( $batch_rows ) ) ? $batch_rows : false;
+    }
+
+    /**
      * Eksekusi Penyimpanan Batch Sertifikat ke Database
      *
      * @param array $rows Array baris yang telah divalidasi
@@ -2979,14 +3014,13 @@ class LSP_Core_Management {
         if ( isset( $_POST['lsp_cert_import_confirm_submit'] ) && check_admin_referer( 'lsp_cert_import_confirm_action', 'lsp_cert_import_confirm_nonce' ) ) {
             $token = isset( $_POST['lsp_batch_token'] ) ? sanitize_text_field( $_POST['lsp_batch_token'] ) : '';
             $trans_key = 'lsp_csv_batch_' . get_current_user_id() . '_' . $token;
-            $batch_rows = get_transient( $trans_key );
+            $batch_rows = self::claim_batch_transient( $trans_key );
 
             if ( false !== $batch_rows && is_array( $batch_rows ) ) {
-                delete_transient( $trans_key );
                 $final_report = self::execute_csv_import_batch( $batch_rows );
                 $page_state   = 'FINAL_REPORT';
             } else {
-                $error_message = __( 'Sesi validasi preview telah kedaluwarsa atau tidak valid. Silakan unggah kembali berkas CSV Anda.', 'lsp-core-management' );
+                $error_message = __( 'Sesi validasi preview telah kedaluwarsa, sedang diproses di request lain, atau tidak valid. Silakan unggah kembali berkas CSV Anda.', 'lsp-core-management' );
                 $page_state    = 'UPLOAD_FORM';
             }
         }

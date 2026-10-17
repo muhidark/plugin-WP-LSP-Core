@@ -285,3 +285,4 @@ Berdasarkan seluruh hasil pengujian faktual:
 
 > **Rekomendasi Rilis:**  
 > Plugin LSP Core Management versi `1.1.0-RC1` **DITERIMA** sebagai Release Candidate. Tim teknis direkomendasikan mengunggah paket `lsp-core-management-release-candidate.zip` ke server **Staging** untuk verifikasi visual 20 skenario browser sebelum dijadwalkan ke produksi live `https://lspkomunikasi.id`.
+

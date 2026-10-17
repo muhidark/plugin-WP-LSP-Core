@@ -208,3 +208,4 @@ Simulasi drill pencadangan dan rollback terukur dieksekusi pada MySQL aktif:
 > Paket rilis `lsp-core-management-release-candidate.zip` versi `1.1.0-RC1` (SHA-256: `e0c2e9c69ac0bb1645987be7d168bf0caf89417b2948fc988c13eeb7a47c2ff3`) dinyatakan **LOLOS SELURUH GERBANG AUDIT OTOMATIS**.  
 >  
 > Disarankan kepada pimpinan proyek untuk mengunggah paket ini ke server **Staging** guna melaksanakan pengujian visual 20 skenario manual penerimaan sebelum dijadwalkan untuk rilis produksi live ke `https://lspkomunikasi.id`.
+

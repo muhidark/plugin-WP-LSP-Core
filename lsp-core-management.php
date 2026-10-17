@@ -3,7 +3,9 @@
  * Plugin Name: LSP Core Management & Sertifikat Checker
  * Plugin URI:  https://lspkomunikasi.id/
  * Description: Plugin inti (Core) untuk Website Lembaga Sertifikasi Profesi (LSP): Manajemen Skema Sertifikasi, Tempat Uji Kompetensi (TUK + Google Maps), Manajemen User Asesor (Multi-Bidang, Masa Berlaku MET 3 Tahun, & Approval Artikel), serta Sistem Verifikasi Keabsahan Sertifikat BNSP.
- * Version:     1.0.0
+ * Version:     1.1.0-RC1
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
  * Author:      Muhadi Ganteng
  * Author URI:  https://instagram.com/yuk.sepedaan
  * Text Domain: lsp-core-management

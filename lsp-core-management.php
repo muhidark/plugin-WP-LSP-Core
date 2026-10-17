@@ -18,6 +18,8 @@ if ( ! class_exists( 'LSP_Core_Management' ) ) :
 
 class LSP_Core_Management {
 
+    const ASESOR_ROLE_VERSION = '1.1.0';
+
     private static $instance = null;
 
     public static function get_instance() {
@@ -47,13 +49,19 @@ class LSP_Core_Management {
         add_filter( 'manage_data_sertifikat_posts_columns', array( $this, 'cert_custom_columns' ) );
         add_action( 'manage_data_sertifikat_posts_custom_column', array( $this, 'cert_custom_column_content' ), 10, 2 );
 
-        // 4. User Profile Fields & Admin Columns untuk Role Asesor
+        // 4. User Profile Fields & Proteksi Otorisasi untuk Role Asesor
         add_action( 'show_user_profile', array( $this, 'render_asesor_user_profile_fields' ) );
         add_action( 'edit_user_profile', array( $this, 'render_asesor_user_profile_fields' ) );
         add_action( 'user_new_form', array( $this, 'render_asesor_new_user_fields' ) );
         add_action( 'personal_options_update', array( $this, 'save_asesor_user_profile_fields' ) );
         add_action( 'edit_user_profile_update', array( $this, 'save_asesor_user_profile_fields' ) );
         add_action( 'user_register', array( $this, 'save_asesor_user_profile_fields' ) );
+
+        // Proteksi Otorisasi Server-Side untuk Profil & Artikel Asesor (Least Privilege)
+        add_filter( 'wp_pre_insert_user_data', array( $this, 'protect_asesor_user_data' ), 10, 4 );
+        add_filter( 'insert_user_meta', array( $this, 'protect_asesor_user_meta' ), 10, 3 );
+        add_filter( 'wp_insert_post_data', array( $this, 'enforce_asesor_post_workflow' ), 10, 2 );
+        add_filter( 'map_meta_cap', array( $this, 'restrict_lsp_cpts_from_asesor' ), 10, 4 );
 
         add_filter( 'manage_users_columns', array( $this, 'asesor_user_columns' ) );
         add_filter( 'manage_users_custom_column', array( $this, 'asesor_user_column_content' ), 10, 3 );
@@ -176,31 +184,58 @@ class LSP_Core_Management {
             'supports'        => array( 'title' ),
         ) );
 
-        // D. Custom User Role: Asesor LSP ('asesor')
-        // Punya hak menulis posting & upload gambar, tetapi TIDAK punya publish_posts (harus di-approve Admin)
+        // D. Custom User Role: Asesor LSP ('asesor') via Version-Based Migration (Idempotent, Zero Repeated Writes)
+        self::maybe_migrate_asesor_role();
+    }
+
+    /**
+     * Version-Based Capability Migration untuk Role Asesor LSP.
+     * Mencegah pemanggilan add_cap/remove_cap dan update_option berulang pada setiap web request (ARCH-01).
+     */
+    public static function maybe_migrate_asesor_role() {
+        $current_version = get_option( 'lsp_asesor_role_version', '' );
+        if ( self::ASESOR_ROLE_VERSION === $current_version && function_exists( 'get_role' ) && get_role( 'asesor' ) ) {
+            return;
+        }
+
+        // Definisi kapabilitas Role Asesor sesuai prinsip least privilege:
+        // Dapat login, membuat draft, upload media, submit for review, dan merevisi artikel pending miliknya.
+        // TIDAK memiliki hak publish, mengedit artikel orang lain, atau mengedit artikel yang sudah terbit.
         $asesor_caps = array(
             'read'                   => true,
             'edit_posts'             => true,
-            'delete_posts'           => true,
             'upload_files'           => true,
+            'delete_posts'           => true,
             'publish_posts'          => false,
             'edit_published_posts'   => false,
+            'edit_others_posts'      => false,
             'delete_published_posts' => false,
+            'delete_others_posts'    => false,
+            'read_private_posts'     => false,
+            'manage_categories'      => false,
         );
-        if ( ! get_role( 'asesor' ) ) {
-            add_role( 'asesor', __( 'Asesor LSP', 'lsp-core-management' ), $asesor_caps );
-        } else {
-            // Pastikan capabilities selalu sinkron (bisa menulis & upload, tapi butuh approval admin untuk publish)
-            $role = get_role( 'asesor' );
-            if ( $role ) {
-                $role->add_cap( 'read' );
-                $role->add_cap( 'edit_posts' );
-                $role->add_cap( 'delete_posts' );
-                $role->add_cap( 'upload_files' );
-                $role->remove_cap( 'publish_posts' );
-                $role->remove_cap( 'edit_published_posts' );
-                $role->remove_cap( 'delete_published_posts' );
+
+        if ( ! function_exists( 'get_role' ) ) {
+            return;
+        }
+
+        $role = get_role( 'asesor' );
+        if ( ! $role ) {
+            if ( function_exists( 'add_role' ) ) {
+                add_role( 'asesor', __( 'Asesor LSP', 'lsp-core-management' ), $asesor_caps );
             }
+        } else {
+            foreach ( $asesor_caps as $cap => $grant ) {
+                if ( $grant ) {
+                    $role->add_cap( $cap );
+                } else {
+                    $role->remove_cap( $cap );
+                }
+            }
+        }
+
+        if ( function_exists( 'update_option' ) ) {
+            update_option( 'lsp_asesor_role_version', self::ASESOR_ROLE_VERSION );
         }
     }
 
@@ -1263,9 +1298,14 @@ class LSP_Core_Management {
     }
 
     private function render_asesor_fields_markup( $user = null ) {
-        wp_nonce_field( 'lsp_save_asesor_profile', 'lsp_asesor_profile_nonce' );
+        $is_admin = current_user_can( 'manage_options' );
+        $user_id  = $user ? $user->ID : 0;
 
-        $user_id            = $user ? $user->ID : 0;
+        // Hanya output nonce jika pengguna adalah Administrator yang berhak menyimpan data
+        if ( $is_admin ) {
+            wp_nonce_field( 'lsp_save_asesor_profile', 'lsp_asesor_profile_nonce' );
+        }
+
         $nomor_met          = $user_id ? get_user_meta( $user_id, 'nomor_met', true ) : '';
         $tanggal_terbit_met = $user_id ? get_user_meta( $user_id, 'tanggal_terbit_met', true ) : '';
         $foto_asesor        = $user_id ? get_user_meta( $user_id, 'foto_asesor', true ) : '';
@@ -1314,9 +1354,19 @@ class LSP_Core_Management {
                 <span class="dashicons dashicons-businessman" style="font-size: 24px; width: 24px; height: 24px;"></span>
                 <?php _e( 'Data Kompetensi & Profil Asesor LSP', 'lsp-core-management' ); ?>
             </h2>
-            <p class="description" style="margin-bottom: 15px;">
-                <?php _e( 'Lengkapi informasi lisensi MET BNSP, masa berlaku sertifikat asesor, multi-bidang keahlian, deskripsi, dan tautan sosial media untuk ditampilkan di halaman Asesor.', 'lsp-core-management' ); ?>
-            </p>
+
+            <?php if ( ! $is_admin ) : ?>
+                <div style="margin-bottom: 20px; padding: 12px 18px; background: #f0f9ff; border-left: 4px solid #0284c7; border-radius: 4px;">
+                    <strong style="color: #0369a1; font-size: 13.5px;">ℹ️ Informasi Lisensi & Data Profesional Asesor LSP</strong>
+                    <p style="margin: 4px 0 0; font-size: 13px; color: #334155; line-height: 1.5;">
+                        Data profesional di bawah ini bersifat <strong>hanya-baca (read-only)</strong> dan dikelola terpusat oleh Administrator LSP sesuai regulasi BNSP. Anda hanya diperkenankan memperbarui <strong>Alamat Email</strong> dan <strong>Kata Sandi</strong> akun pada formulir profil standar WordPress. Untuk permohonan pembaruan lisensi MET atau kompetensi, silakan hubungi Administrator LSP.
+                    </p>
+                </div>
+            <?php else : ?>
+                <p class="description" style="margin-bottom: 15px;">
+                    <?php _e( 'Lengkapi informasi lisensi MET BNSP, masa berlaku sertifikat asesor, multi-bidang keahlian, deskripsi, dan tautan sosial media untuk ditampilkan di halaman Asesor.', 'lsp-core-management' ); ?>
+                </p>
+            <?php endif; ?>
 
             <table class="form-table" role="presentation">
                 <!-- 1. Foto Profil Asesor -->
@@ -1331,14 +1381,20 @@ class LSP_Core_Management {
                                     <span class="dashicons dashicons-admin-users" style="font-size: 36px; width: 36px; height: 36px; color: #94a3b8;"></span>
                                 <?php endif; ?>
                             </div>
-                            <div style="flex: 1; min-width: 260px;">
-                                <input type="text" name="foto_asesor" id="foto_asesor" value="<?php echo esc_attr( $foto_asesor ); ?>" class="regular-text" placeholder="URL foto atau pilih dari Media Library..." />
-                                <div style="margin-top: 8px; display: flex; gap: 8px;">
-                                    <button type="button" class="button" id="btn_upload_foto_asesor"><?php _e( 'Pilih / Unggah Foto', 'lsp-core-management' ); ?></button>
-                                    <button type="button" class="button" id="btn_remove_foto_asesor" <?php echo empty( $foto_asesor ) ? 'style="display:none;"' : ''; ?>><?php _e( 'Hapus Foto', 'lsp-core-management' ); ?></button>
+                            <?php if ( $is_admin ) : ?>
+                                <div style="flex: 1; min-width: 260px;">
+                                    <input type="text" name="foto_asesor" id="foto_asesor" value="<?php echo esc_attr( $foto_asesor ); ?>" class="regular-text" placeholder="URL foto atau pilih dari Media Library..." />
+                                    <div style="margin-top: 8px; display: flex; gap: 8px;">
+                                        <button type="button" class="button" id="btn_upload_foto_asesor"><?php _e( 'Pilih / Unggah Foto', 'lsp-core-management' ); ?></button>
+                                        <button type="button" class="button" id="btn_remove_foto_asesor" <?php echo empty( $foto_asesor ) ? 'style="display:none;"' : ''; ?>><?php _e( 'Hapus Foto', 'lsp-core-management' ); ?></button>
+                                    </div>
+                                    <p class="description"><?php _e( 'Jika dikosongkan, sistem otomatis menggunakan Gravatar akun.', 'lsp-core-management' ); ?></p>
                                 </div>
-                                <p class="description"><?php _e( 'Jika dikosongkan, sistem otomatis menggunakan Gravatar akun.', 'lsp-core-management' ); ?></p>
-                            </div>
+                            <?php else : ?>
+                                <div style="flex: 1; min-width: 260px;">
+                                    <span style="font-size: 13px; color: #64748b;"><?php _e( 'Foto resmi profil Asesor dikelola oleh Administrator LSP.', 'lsp-core-management' ); ?></span>
+                                </div>
+                            <?php endif; ?>
                         </div>
                     </td>
                 </tr>
@@ -1347,8 +1403,12 @@ class LSP_Core_Management {
                 <tr>
                     <th><label for="nomor_met"><?php _e( 'Nomor Registrasi / Sertifikat MET', 'lsp-core-management' ); ?></label></th>
                     <td>
-                        <input type="text" name="nomor_met" id="nomor_met" value="<?php echo esc_attr( $nomor_met ); ?>" class="regular-text" placeholder="Contoh: MET.000.001234.2024" />
-                        <p class="description"><?php _e( 'Nomor Registrasi Asesor Kompetensi yang diterbitkan oleh BNSP.', 'lsp-core-management' ); ?></p>
+                        <?php if ( $is_admin ) : ?>
+                            <input type="text" name="nomor_met" id="nomor_met" value="<?php echo esc_attr( $nomor_met ); ?>" class="regular-text" placeholder="Contoh: MET.000.001234.2024" />
+                            <p class="description"><?php _e( 'Nomor Registrasi Asesor Kompetensi yang diterbitkan oleh BNSP.', 'lsp-core-management' ); ?></p>
+                        <?php else : ?>
+                            <input type="text" value="<?php echo esc_attr( $nomor_met ?: 'Belum diisi oleh Administrator' ); ?>" class="regular-text" readonly disabled style="background: #f8fafc; cursor: not-allowed; font-weight: 600;" />
+                        <?php endif; ?>
                     </td>
                 </tr>
 
@@ -1356,35 +1416,54 @@ class LSP_Core_Management {
                 <tr>
                     <th><label for="tanggal_terbit_met"><?php _e( 'Tanggal Dikeluarkan Sertifikat MET', 'lsp-core-management' ); ?></label></th>
                     <td>
-                        <input type="date" name="tanggal_terbit_met" id="tanggal_terbit_met" value="<?php echo esc_attr( $tanggal_terbit_met ); ?>" class="regular-text" style="max-width: 240px;" />
-                        <p class="description"><?php _e( 'Sertifikat kompetensi Asesor berlaku selama 3 tahun sejak tanggal dikeluarkan.', 'lsp-core-management' ); ?></p>
+                        <?php if ( $is_admin ) : ?>
+                            <input type="date" name="tanggal_terbit_met" id="tanggal_terbit_met" value="<?php echo esc_attr( $tanggal_terbit_met ); ?>" class="regular-text" style="max-width: 240px;" />
+                            <p class="description"><?php _e( 'Sertifikat kompetensi Asesor berlaku selama 3 tahun sejak tanggal dikeluarkan.', 'lsp-core-management' ); ?></p>
+                        <?php else : ?>
+                            <input type="text" value="<?php echo esc_attr( ! empty( $tanggal_terbit_met ) ? $this->format_indo_date( strtotime( $tanggal_terbit_met ) ) : 'Belum diisi' ); ?>" class="regular-text" readonly disabled style="max-width: 240px; background: #f8fafc; cursor: not-allowed;" />
+                        <?php endif; ?>
                         <?php echo $status_met_html; ?>
                     </td>
                 </tr>
 
                 <!-- 4. Bidang Keahlian (Multi-Select / Bisa Lebih dari Satu) -->
                 <tr>
-                    <th><label><?php _e( 'Bidang / Skema Keahlian (Bisa Pilih Lebih dari Satu)', 'lsp-core-management' ); ?></label></th>
+                    <th><label><?php _e( 'Bidang / Skema Keahlian', 'lsp-core-management' ); ?></label></th>
                     <td>
-                        <?php if ( ! empty( $skema_posts ) ) : ?>
-                            <div style="max-height: 200px; overflow-y: auto; border: 1px solid #ccd0d4; padding: 12px 15px; border-radius: 4px; background: #f8fafc; max-width: 550px; margin-bottom: 10px;">
-                                <strong style="display: block; margin-bottom: 8px; font-size: 12.5px; color: #334155;">Pilih dari Skema Sertifikasi LSP:</strong>
-                                <?php foreach ( $skema_posts as $skema_item ) : 
-                                    $checked = in_array( $skema_item->post_title, $bidang_keahlian, true );
-                                ?>
-                                    <label style="display: block; margin-bottom: 6px; font-size: 13.5px;">
-                                        <input type="checkbox" name="bidang_keahlian_asesor[]" value="<?php echo esc_attr( $skema_item->post_title ); ?>" <?php checked( $checked ); ?> />
-                                        <?php echo esc_html( $skema_item->post_title ); ?>
-                                    </label>
-                                <?php endforeach; ?>
-                            </div>
-                        <?php endif; ?>
+                        <?php if ( $is_admin ) : ?>
+                            <?php if ( ! empty( $skema_posts ) ) : ?>
+                                <div style="max-height: 200px; overflow-y: auto; border: 1px solid #ccd0d4; padding: 12px 15px; border-radius: 4px; background: #f8fafc; max-width: 550px; margin-bottom: 10px;">
+                                    <strong style="display: block; margin-bottom: 8px; font-size: 12.5px; color: #334155;">Pilih dari Skema Sertifikasi LSP:</strong>
+                                    <?php foreach ( $skema_posts as $skema_item ) : 
+                                        $checked = in_array( $skema_item->post_title, $bidang_keahlian, true );
+                                    ?>
+                                        <label style="display: block; margin-bottom: 6px; font-size: 13.5px;">
+                                            <input type="checkbox" name="bidang_keahlian_asesor[]" value="<?php echo esc_attr( $skema_item->post_title ); ?>" <?php checked( $checked ); ?> />
+                                            <?php echo esc_html( $skema_item->post_title ); ?>
+                                        </label>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
 
-                        <label for="bidang_keahlian_tambahan" style="display:block; font-weight:600; margin-bottom:4px; font-size:13px;">
-                            <?php _e( 'Bidang Keahlian Lainnya / Tambahan (Pisahkan dengan tanda koma):', 'lsp-core-management' ); ?>
-                        </label>
-                        <input type="text" name="bidang_keahlian_tambahan" id="bidang_keahlian_tambahan" value="<?php echo esc_attr( $bidang_tambahan ); ?>" class="large-text" style="max-width: 550px;" placeholder="Contoh: Public Relations, Digital Marketing, Komunikasi Korporat" />
-                        <p class="description"><?php _e( 'Anda dapat mencentang beberapa skema di atas sekaligus dan/atau menuliskan beberapa bidang keahlian tambahan yang dipisahkan koma.', 'lsp-core-management' ); ?></p>
+                            <label for="bidang_keahlian_tambahan" style="display:block; font-weight:600; margin-bottom:4px; font-size:13px;">
+                                <?php _e( 'Bidang Keahlian Lainnya / Tambahan (Pisahkan dengan tanda koma):', 'lsp-core-management' ); ?>
+                            </label>
+                            <input type="text" name="bidang_keahlian_tambahan" id="bidang_keahlian_tambahan" value="<?php echo esc_attr( $bidang_tambahan ); ?>" class="large-text" style="max-width: 550px;" placeholder="Contoh: Public Relations, Digital Marketing, Komunikasi Korporat" />
+                            <p class="description"><?php _e( 'Anda dapat mencentang beberapa skema di atas sekaligus dan/atau menuliskan beberapa bidang keahlian tambahan yang dipisahkan koma.', 'lsp-core-management' ); ?></p>
+                        <?php else : ?>
+                            <?php 
+                            $all_b = $this->get_asesor_all_bidang( $user_id );
+                            if ( ! empty( $all_b ) ) :
+                                echo '<div style="display:flex; flex-wrap:wrap; gap:6px; max-width:550px;">';
+                                foreach ( $all_b as $b ) :
+                                    echo '<span style="display:inline-block; background:#fff8f0; color:#72161a; border:1px solid #f89b29; padding:4px 12px; border-radius:12px; font-size:12px; font-weight:600;">' . esc_html( $b ) . '</span>';
+                                endforeach;
+                                echo '</div>';
+                            else :
+                                echo '<span style="color:#94a3b8; font-size:13px;">' . __( '— Belum ada bidang keahlian yang ditetapkan oleh Administrator —', 'lsp-core-management' ) . '</span>';
+                            endif;
+                            ?>
+                        <?php endif; ?>
                     </td>
                 </tr>
 
@@ -1392,8 +1471,12 @@ class LSP_Core_Management {
                 <tr>
                     <th><label for="deskripsi_asesor"><?php _e( 'Deskripsi / Biografi & Pengalaman Asesor', 'lsp-core-management' ); ?></label></th>
                     <td>
-                        <textarea name="deskripsi_asesor" id="deskripsi_asesor" rows="4" class="large-text" style="max-width: 550px;" placeholder="Tuliskan deskripsi singkat, latar belakang profesional, pengalaman industri, atau informasi tambahan lainnya..."><?php echo esc_textarea( $deskripsi_asesor ); ?></textarea>
-                        <p class="description"><?php _e( 'Teks deskripsi ini akan ditampilkan pada kartu / profil Asesor di halaman depan.', 'lsp-core-management' ); ?></p>
+                        <?php if ( $is_admin ) : ?>
+                            <textarea name="deskripsi_asesor" id="deskripsi_asesor" rows="4" class="large-text" style="max-width: 550px;" placeholder="Tuliskan deskripsi singkat, latar belakang profesional, pengalaman industri, atau informasi tambahan lainnya..."><?php echo esc_textarea( $deskripsi_asesor ); ?></textarea>
+                            <p class="description"><?php _e( 'Teks deskripsi ini akan ditampilkan pada kartu / profil Asesor di halaman depan.', 'lsp-core-management' ); ?></p>
+                        <?php else : ?>
+                            <textarea readonly disabled rows="4" class="large-text" style="max-width: 550px; background: #f8fafc; cursor: not-allowed;"><?php echo esc_textarea( $deskripsi_asesor ?: __( 'Belum ada deskripsi profil yang ditambahkan oleh Administrator.', 'lsp-core-management' ) ); ?></textarea>
+                        <?php endif; ?>
                     </td>
                 </tr>
 
@@ -1404,19 +1487,19 @@ class LSP_Core_Management {
                         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; max-width: 550px;">
                             <div>
                                 <label for="asesor_linkedin" style="font-weight: 600; font-size: 12.5px; display: block; margin-bottom: 4px;">🔗 LinkedIn URL</label>
-                                <input type="url" name="asesor_linkedin" id="asesor_linkedin" value="<?php echo esc_attr( $asesor_linkedin ); ?>" class="regular-text" style="width: 100%;" placeholder="https://linkedin.com/in/username" />
+                                <input type="url" name="asesor_linkedin" id="asesor_linkedin" value="<?php echo esc_attr( $asesor_linkedin ); ?>" class="regular-text" style="width: 100%;<?php echo ! $is_admin ? ' background:#f8fafc; cursor:not-allowed;' : ''; ?>" placeholder="https://linkedin.com/in/username" <?php echo ! $is_admin ? 'readonly disabled' : ''; ?> />
                             </div>
                             <div>
                                 <label for="asesor_instagram" style="font-weight: 600; font-size: 12.5px; display: block; margin-bottom: 4px;">📸 Instagram URL</label>
-                                <input type="url" name="asesor_instagram" id="asesor_instagram" value="<?php echo esc_attr( $asesor_instagram ); ?>" class="regular-text" style="width: 100%;" placeholder="https://instagram.com/username" />
+                                <input type="url" name="asesor_instagram" id="asesor_instagram" value="<?php echo esc_attr( $asesor_instagram ); ?>" class="regular-text" style="width: 100%;<?php echo ! $is_admin ? ' background:#f8fafc; cursor:not-allowed;' : ''; ?>" placeholder="https://instagram.com/username" <?php echo ! $is_admin ? 'readonly disabled' : ''; ?> />
                             </div>
                             <div>
                                 <label for="asesor_facebook" style="font-weight: 600; font-size: 12.5px; display: block; margin-bottom: 4px;">📘 Facebook URL</label>
-                                <input type="url" name="asesor_facebook" id="asesor_facebook" value="<?php echo esc_attr( $asesor_facebook ); ?>" class="regular-text" style="width: 100%;" placeholder="https://facebook.com/username" />
+                                <input type="url" name="asesor_facebook" id="asesor_facebook" value="<?php echo esc_attr( $asesor_facebook ); ?>" class="regular-text" style="width: 100%;<?php echo ! $is_admin ? ' background:#f8fafc; cursor:not-allowed;' : ''; ?>" placeholder="https://facebook.com/username" <?php echo ! $is_admin ? 'readonly disabled' : ''; ?> />
                             </div>
                             <div>
                                 <label for="asesor_website" style="font-weight: 600; font-size: 12.5px; display: block; margin-bottom: 4px;">🌐 Website / Link Lainnya</label>
-                                <input type="url" name="asesor_website" id="asesor_website" value="<?php echo esc_attr( $asesor_website ); ?>" class="regular-text" style="width: 100%;" placeholder="https://website-anda.com" />
+                                <input type="url" name="asesor_website" id="asesor_website" value="<?php echo esc_attr( $asesor_website ); ?>" class="regular-text" style="width: 100%;<?php echo ! $is_admin ? ' background:#f8fafc; cursor:not-allowed;' : ''; ?>" placeholder="https://website-anda.com" <?php echo ! $is_admin ? 'readonly disabled' : ''; ?> />
                             </div>
                         </div>
                     </td>
@@ -1424,37 +1507,39 @@ class LSP_Core_Management {
             </table>
         </div>
 
-        <script>
-        jQuery(document).ready(function($){
-            var mediaUploader;
-            $('#btn_upload_foto_asesor').on('click', function(e) {
-                e.preventDefault();
-                if (mediaUploader) {
+        <?php if ( $is_admin ) : ?>
+            <script>
+            jQuery(document).ready(function($){
+                var mediaUploader;
+                $('#btn_upload_foto_asesor').on('click', function(e) {
+                    e.preventDefault();
+                    if (mediaUploader) {
+                        mediaUploader.open();
+                        return;
+                    }
+                    mediaUploader = wp.media({
+                        title: 'Pilih Foto Resmi Asesor',
+                        button: { text: 'Gunakan Foto Ini' },
+                        multiple: false
+                    });
+                    mediaUploader.on('select', function() {
+                        var attachment = mediaUploader.state().get('selection').first().toJSON();
+                        $('#foto_asesor').val(attachment.url);
+                        $('#foto_asesor_preview').html('<img src="' + attachment.url + '" style="width:100%; height:100%; object-fit:cover;" />');
+                        $('#btn_remove_foto_asesor').show();
+                    });
                     mediaUploader.open();
-                    return;
-                }
-                mediaUploader = wp.media({
-                    title: 'Pilih Foto Resmi Asesor',
-                    button: { text: 'Gunakan Foto Ini' },
-                    multiple: false
                 });
-                mediaUploader.on('select', function() {
-                    var attachment = mediaUploader.state().get('selection').first().toJSON();
-                    $('#foto_asesor').val(attachment.url);
-                    $('#foto_asesor_preview').html('<img src="' + attachment.url + '" style="width:100%; height:100%; object-fit:cover;" />');
-                    $('#btn_remove_foto_asesor').show();
-                });
-                mediaUploader.open();
-            });
 
-            $('#btn_remove_foto_asesor').on('click', function(e) {
-                e.preventDefault();
-                $('#foto_asesor').val('');
-                $('#foto_asesor_preview').html('<span class="dashicons dashicons-admin-users" style="font-size:36px; width:36px; height:36px; color:#94a3b8;"></span>');
-                $(this).hide();
+                $('#btn_remove_foto_asesor').on('click', function(e) {
+                    e.preventDefault();
+                    $('#foto_asesor').val('');
+                    $('#foto_asesor_preview').html('<span class="dashicons dashicons-admin-users" style="font-size:36px; width:36px; height:36px; color:#94a3b8;"></span>');
+                    $(this).hide();
+                });
             });
-        });
-        </script>
+            </script>
+        <?php endif; ?>
         <?php
     }
 
@@ -1462,6 +1547,14 @@ class LSP_Core_Management {
         if ( ! isset( $_POST['lsp_asesor_profile_nonce'] ) ) return;
         if ( ! wp_verify_nonce( $_POST['lsp_asesor_profile_nonce'], 'lsp_save_asesor_profile' ) ) return;
         if ( ! current_user_can( 'edit_user', $user_id ) ) return;
+
+        // Otorisasi Ketat Server-Side (TASK 3 & TASK 5):
+        // Hanya pengguna dengan kapabilitas 'manage_options' (Administrator) yang diizinkan memperbarui data profesional Asesor.
+        // Asesor yang mengedit profilnya sendiri di profile.php DITOLAK keras untuk mengubah data lisensi/profesional,
+        // meskipun request dikirim langsung secara manual via HTTP POST.
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return;
+        }
 
         if ( isset( $_POST['foto_asesor'] ) ) {
             update_user_meta( $user_id, 'foto_asesor', esc_url_raw( trim( $_POST['foto_asesor'] ) ) );
@@ -1498,6 +1591,120 @@ class LSP_Core_Management {
         if ( isset( $_POST['asesor_website'] ) ) {
             update_user_meta( $user_id, 'asesor_website', esc_url_raw( trim( $_POST['asesor_website'] ) ) );
         }
+    }
+
+    /**
+     * Lindungi data profil akun Asesor agar display_name dan user_nicename tidak dapat dimanipulasi
+     * oleh Asesor itu sendiri (hanya boleh diubah Administrator). Asesor hanya boleh mengubah email & password.
+     */
+    public function protect_asesor_user_data( $data, $update, $user_id, $userdata ) {
+        if ( ! $update || empty( $user_id ) ) {
+            return $data;
+        }
+
+        $user = get_userdata( $user_id );
+        if ( $user && in_array( 'asesor', (array) $user->roles, true ) ) {
+            // Jika bukan administrator (Asesor mengedit profilnya sendiri)
+            if ( ! current_user_can( 'manage_options' ) ) {
+                $data['display_name']  = $user->display_name;
+                $data['user_nicename'] = $user->user_nicename;
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Lindungi user meta standar (nama depan, nama belakang, biografi standar) milik akun Asesor
+     * agar tidak dapat diubah oleh Asesor sendiri, serta cegah manipulasi meta field profesional.
+     */
+    public function protect_asesor_user_meta( $meta, $user, $update ) {
+        if ( ! $update || empty( $user->ID ) ) {
+            return $meta;
+        }
+
+        if ( in_array( 'asesor', (array) $user->roles, true ) ) {
+            if ( ! current_user_can( 'manage_options' ) ) {
+                $orig_user = get_userdata( $user->ID );
+                if ( $orig_user ) {
+                    $meta['first_name']  = $orig_user->first_name;
+                    $meta['last_name']   = $orig_user->last_name;
+                    $meta['nickname']    = $orig_user->nickname;
+                    $meta['description'] = $orig_user->description;
+                }
+
+                $protected_keys = array(
+                    'nomor_met',
+                    'tanggal_terbit_met',
+                    'foto_asesor',
+                    'bidang_keahlian_asesor',
+                    'bidang_keahlian_tambahan',
+                    'deskripsi_asesor',
+                    'asesor_linkedin',
+                    'asesor_instagram',
+                    'asesor_facebook',
+                    'asesor_website',
+                );
+                foreach ( $protected_keys as $key ) {
+                    unset( $meta[ $key ] );
+                }
+            }
+        }
+
+        return $meta;
+    }
+
+    /**
+     * Penegakan Workflow Artikel Asesor:
+     * Asesor hanya boleh menyimpan Draft atau Submit for Review (Pending).
+     * Jika artikel sudah dipublikasikan (Publish) oleh Admin, artikel bersifat strictly Read-Only bagi Asesor.
+     */
+    public function enforce_asesor_post_workflow( $data, $postarr ) {
+        if ( 'post' === $data['post_type'] ) {
+            $user = wp_get_current_user();
+            if ( $user && in_array( 'asesor', (array) $user->roles, true ) && ! current_user_can( 'manage_options' ) ) {
+                // 1. Asesor tidak boleh mem-publish langsung; status harus pending atau draft
+                if ( in_array( $data['post_status'], array( 'publish', 'future', 'private' ), true ) ) {
+                    $data['post_status'] = 'pending';
+                }
+
+                // 2. Jika post target sudah berstatus 'publish', asesor dilarang mengubah konten (Read-Only)
+                if ( ! empty( $postarr['ID'] ) ) {
+                    $orig_post = get_post( $postarr['ID'] );
+                    if ( $orig_post && 'publish' === $orig_post->post_status ) {
+                        $data['post_status']  = 'publish';
+                        $data['post_title']   = $orig_post->post_title;
+                        $data['post_content'] = $orig_post->post_content;
+                        $data['post_excerpt'] = $orig_post->post_excerpt;
+                    }
+                }
+            }
+        }
+        return $data;
+    }
+
+    /**
+     * Proteksi CPT LSP (Data Sertifikat, Skema, TUK) dari Role Asesor
+     */
+    public function restrict_lsp_cpts_from_asesor( $caps, $cap, $user_id, $args ) {
+        if ( empty( $user_id ) ) {
+            return $caps;
+        }
+
+        $user = get_userdata( $user_id );
+        if ( ! $user || ! in_array( 'asesor', (array) $user->roles, true ) ) {
+            return $caps;
+        }
+
+        if ( in_array( $cap, array( 'edit_post', 'delete_post', 'read_post' ), true ) && ! empty( $args[0] ) ) {
+            $post_id   = $args[0];
+            $post_type = get_post_type( $post_id );
+            if ( in_array( $post_type, array( 'data_sertifikat', 'skema', 'tuk' ), true ) ) {
+                return array( 'manage_options' );
+            }
+        }
+
+        return $caps;
     }
 
     /**
@@ -1677,7 +1884,7 @@ class LSP_Core_Management {
         add_menu_page(
             __( 'Manajemen Asesor LSP', 'lsp-core-management' ),
             __( 'Asesor LSP', 'lsp-core-management' ),
-            'list_users',
+            'manage_options',
             'lsp-asesor-directory',
             array( $this, 'render_asesor_admin_page' ),
             'dashicons-businessman',

@@ -2224,95 +2224,764 @@ class LSP_Core_Management {
         }
     }
 
-    public function render_import_page() {
-        if ( ! current_user_can( 'manage_options' ) ) return;
+    /**
+     * Helper sentral untuk mencari ID sertifikat berdasarkan meta key dan value (exact match).
+     * Digunakan bersama oleh save_cert_meta, ajax_verify_cert, dan CSV Import.
+     *
+     * @param string $meta_key 'kode_blanko' atau 'no_registrasi'
+     * @param string $value Nilai nomor sertifikat yang telah dinormalisasi
+     * @param int    $exclude_id ID post yang dikecualikan (opsional)
+     * @return int[] Daftar ID post yang cocok
+     */
+    public static function find_certs_by_meta( $meta_key, $value, $exclude_id = 0 ) {
+        if ( ! is_scalar( $value ) || '' === trim( (string) $value ) ) {
+            return array();
+        }
 
-        $message = '';
-        if ( isset( $_POST['lsp_cert_import_submit'] ) && check_admin_referer( 'lsp_cert_import_action', 'lsp_cert_import_nonce' ) ) {
-            if ( ! empty( $_FILES['csv_file']['tmp_name'] ) ) {
-                $file   = $_FILES['csv_file']['tmp_name'];
-                $handle = fopen( $file, 'r' );
-                if ( false !== $handle ) {
-                    $header   = fgetcsv( $handle, 1000, ',' );
-                    $imported = 0;
-                    $updated  = 0;
+        $query_args = array(
+            'post_type'              => 'data_sertifikat',
+            'post_status'            => 'any',
+            'posts_per_page'         => 3, // Ambil hingga 3 record untuk deteksi duplikasi & ambiguitas
+            'fields'                 => 'ids',
+            'no_found_rows'          => true,
+            'update_post_meta_cache' => false,
+            'update_post_term_cache' => false,
+            'meta_query'             => array(
+                array(
+                    'key'     => $meta_key,
+                    'value'   => $value,
+                    'compare' => '=',
+                ),
+            ),
+        );
 
-                    while ( false !== ( $row = fgetcsv( $handle, 1000, ',' ) ) ) {
-                        if ( empty( $row[0] ) || empty( $row[1] ) ) continue;
+        if ( $exclude_id > 0 ) {
+            $query_args['post__not_in'] = array( (int) $exclude_id );
+        }
 
-                        $kode_blanko   = sanitize_text_field( trim( $row[0] ) );
-                        $nama_pemegang = sanitize_text_field( trim( $row[1] ) );
-                        $no_reg        = isset( $row[2] ) ? sanitize_text_field( trim( $row[2] ) ) : '';
-                        $skema         = isset( $row[3] ) ? sanitize_text_field( trim( $row[3] ) ) : '';
-                        $tgl_terbit    = isset( $row[4] ) ? sanitize_text_field( trim( $row[4] ) ) : '';
+        $q = new WP_Query( $query_args );
+        return ! empty( $q->posts ) ? array_map( 'intval', $q->posts ) : array();
+    }
 
-                        $existing = get_posts( array(
-                            'post_type'  => 'data_sertifikat',
-                            'meta_key'   => 'kode_blanko',
-                            'meta_value' => $kode_blanko,
-                            'fields'     => 'ids',
-                        ) );
+    /**
+     * Validasi Keamanan File Upload CSV
+     *
+     * @param array $file_info Elemen dari $_FILES
+     * @return array array( 'valid' => bool, 'error' => string )
+     */
+    public static function validate_csv_upload_file( $file_info ) {
+        if ( ! is_array( $file_info ) || ! isset( $file_info['error'] ) ) {
+            return array( 'valid' => false, 'error' => __( 'File upload tidak ditemukan atau berkas rusak.', 'lsp-core-management' ) );
+        }
 
-                        if ( ! empty( $existing ) ) {
-                            $post_id = $existing[0];
-                            wp_update_post( array(
-                                'ID'         => $post_id,
-                                'post_title' => $kode_blanko . ' - ' . $nama_pemegang,
-                            ) );
-                            $updated++;
-                        } else {
-                            $post_id = wp_insert_post( array(
-                                'post_type'   => 'data_sertifikat',
-                                'post_title'  => $kode_blanko . ' - ' . $nama_pemegang,
-                                'post_status' => 'publish',
-                            ) );
-                            $imported++;
-                        }
+        if ( UPLOAD_ERR_OK !== $file_info['error'] ) {
+            switch ( $file_info['error'] ) {
+                case UPLOAD_ERR_INI_SIZE:
+                case UPLOAD_ERR_FORM_SIZE:
+                    return array( 'valid' => false, 'error' => __( 'Ukuran file melebihi batas maksimal konfigurasi server.', 'lsp-core-management' ) );
+                case UPLOAD_ERR_NO_FILE:
+                    return array( 'valid' => false, 'error' => __( 'Silakan pilih file CSV terlebih dahulu.', 'lsp-core-management' ) );
+                default:
+                    return array( 'valid' => false, 'error' => sprintf( __( 'Gagal mengunggah file (Kode error upload: %d).', 'lsp-core-management' ), intval( $file_info['error'] ) ) );
+            }
+        }
 
-                        if ( $post_id ) {
-                            update_post_meta( $post_id, 'kode_blanko', $kode_blanko );
-                            update_post_meta( $post_id, 'nama_pemegang', $nama_pemegang );
-                            update_post_meta( $post_id, 'no_registrasi', $no_reg );
-                            update_post_meta( $post_id, 'skema_sertifikasi', $skema );
-                            update_post_meta( $post_id, 'tanggal_terbit', $tgl_terbit );
-                        }
+        $tmp_path = isset( $file_info['tmp_name'] ) ? (string) $file_info['tmp_name'] : '';
+        if ( '' === $tmp_path || ! is_readable( $tmp_path ) ) {
+            return array( 'valid' => false, 'error' => __( 'File sementara tidak dapat dibaca oleh server.', 'lsp-core-management' ) );
+        }
+
+        // Batas ukuran 5 MB (5 * 1024 * 1024 bytes) - Cukup untuk >50.000 baris sertifikat
+        $max_size = 5 * 1024 * 1024;
+        $size = isset( $file_info['size'] ) ? intval( $file_info['size'] ) : filesize( $tmp_path );
+        if ( $size > $max_size ) {
+            return array( 'valid' => false, 'error' => __( 'Ukuran file melebihi batas maksimal 5 MB.', 'lsp-core-management' ) );
+        }
+
+        // Validasi ekstensi nama file
+        $name = isset( $file_info['name'] ) ? (string) $file_info['name'] : '';
+        $ext  = strtolower( pathinfo( $name, PATHINFO_EXTENSION ) );
+        if ( ! in_array( $ext, array( 'csv', 'txt' ), true ) ) {
+            return array( 'valid' => false, 'error' => __( 'Format file tidak diizinkan. Hanya file berekstensi .csv atau .txt yang diperbolehkan.', 'lsp-core-management' ) );
+        }
+
+        // Validasi keamanan isi file: larang executable, PHP tags, inline scripts
+        $handle = fopen( $tmp_path, 'r' );
+        if ( $handle ) {
+            $sample = fread( $handle, 4096 );
+            fclose( $handle );
+            if ( false !== $sample ) {
+                if ( preg_match( '/(<\?php|<\?=|<script\b|<\%|\bdata:text\/html\b)/i', $sample ) ) {
+                    return array( 'valid' => false, 'error' => __( 'Peringatan Keamanan: File terdeteksi mengandung tag PHP atau skrip berbahaya.', 'lsp-core-management' ) );
+                }
+            }
+        }
+
+        return array( 'valid' => true, 'error' => '' );
+    }
+
+    /**
+     * Deteksi Otomatis Pemisah Kolom CSV (Koma vs Titik Koma)
+     *
+     * @param string $file_path Path file CSV
+     * @return string ',' atau ';'
+     */
+    public static function detect_csv_delimiter( $file_path ) {
+        $handle = fopen( $file_path, 'r' );
+        if ( ! $handle ) {
+            return ',';
+        }
+        $line = fgets( $handle );
+        fclose( $handle );
+
+        if ( false === $line ) {
+            return ',';
+        }
+
+        // Hapus UTF-8 BOM jika ada
+        if ( substr( $line, 0, 3 ) === "\xEF\xBB\xBF" ) {
+            $line = substr( $line, 3 );
+        }
+
+        $semicolons = substr_count( $line, ';' );
+        $commas     = substr_count( $line, ',' );
+
+        return ( $semicolons > $commas ) ? ';' : ',';
+    }
+
+    /**
+     * Parsing dan Validasi Preflight Berkas CSV (Tanpa Menulis ke Database)
+     *
+     * @param string $file_path Path berkas CSV
+     * @return array Hasil parsing dan validasi per baris
+     */
+    public static function parse_and_validate_csv_data( $file_path ) {
+        if ( ! file_exists( $file_path ) || ! is_readable( $file_path ) ) {
+            return array(
+                'success' => false,
+                'error'   => __( 'Berkas CSV tidak ditemukan atau tidak dapat dibaca.', 'lsp-core-management' ),
+            );
+        }
+
+        $delimiter = self::detect_csv_delimiter( $file_path );
+        $handle    = fopen( $file_path, 'r' );
+        if ( ! $handle ) {
+            return array(
+                'success' => false,
+                'error'   => __( 'Gagal membuka berkas CSV.', 'lsp-core-management' ),
+            );
+        }
+
+        // Baca header CSV
+        $raw_header = fgetcsv( $handle, 2048, $delimiter );
+        if ( false === $raw_header || empty( $raw_header ) ) {
+            fclose( $handle );
+            return array(
+                'success' => false,
+                'error'   => __( 'Berkas CSV kosong atau tidak memiliki baris header.', 'lsp-core-management' ),
+            );
+        }
+
+        // Hapus BOM pada nama kolom pertama jika ada
+        if ( isset( $raw_header[0] ) && substr( $raw_header[0], 0, 3 ) === "\xEF\xBB\xBF" ) {
+            $raw_header[0] = substr( $raw_header[0], 3 );
+        }
+
+        if ( count( $raw_header ) < 5 ) {
+            fclose( $handle );
+            return array(
+                'success' => false,
+                'error'   => __( 'Header CSV tidak valid. Berkas harus memiliki minimal 5 kolom: kode_blanko, nama_pemegang, no_registrasi, skema_sertifikasi, tanggal_terbit.', 'lsp-core-management' ),
+            );
+        }
+
+        // Normalisasi nama-nama kolom header
+        $header_map = array();
+        foreach ( $raw_header as $idx => $col_name ) {
+            $norm = strtolower( trim( preg_replace( '/[^a-zA-Z0-9_]/', '_', (string) $col_name ) ) );
+            $header_map[ $norm ] = $idx;
+        }
+
+        $find_idx = function( $aliases, $default_idx ) use ( $header_map ) {
+            foreach ( $aliases as $alias ) {
+                if ( isset( $header_map[ $alias ] ) ) {
+                    return $header_map[ $alias ];
+                }
+            }
+            return $default_idx;
+        };
+
+        $col_blanko = $find_idx( array( 'kode_blanko', 'nomor_blanko', 'no_blanko', 'blanko' ), 0 );
+        $col_nama   = $find_idx( array( 'nama_pemegang', 'nama', 'nama_lengkap', 'asesi' ), 1 );
+        $col_reg    = $find_idx( array( 'no_registrasi', 'nomor_registrasi', 'registrasi', 'no_reg' ), 2 );
+        $col_skema  = $find_idx( array( 'skema_sertifikasi', 'skema', 'skema_kompetensi', 'judul_skema' ), 3 );
+        $col_tgl    = $find_idx( array( 'tanggal_terbit', 'tgl_terbit', 'tanggal', 'tgl' ), 4 );
+
+        $rows_data     = array();
+        $seen_blanko   = array(); // blanko => row_num
+        $seen_reg      = array(); // reg => row_num
+        $row_number    = 1;
+
+        $valid_inserts = 0;
+        $valid_updates = 0;
+        $skipped_count = 0;
+
+        while ( false !== ( $raw_row = fgetcsv( $handle, 4096, $delimiter ) ) ) {
+            $row_number++;
+
+            // Lewati baris kosong
+            if ( empty( $raw_row ) || ( 1 === count( $raw_row ) && null === $raw_row[0] ) ) {
+                continue;
+            }
+            $all_empty = true;
+            foreach ( $raw_row as $cell ) {
+                if ( '' !== trim( (string) $cell ) ) {
+                    $all_empty = false;
+                    break;
+                }
+            }
+            if ( $all_empty ) {
+                continue;
+            }
+
+            $row_errors = array();
+
+            // Pengecekan jumlah kolom data pada baris ini
+            if ( count( $raw_row ) < 5 ) {
+                $row_errors[] = __( 'Jumlah kolom pada baris ini tidak lengkap (kurang dari 5 kolom).', 'lsp-core-management' );
+            }
+
+            $raw_b = isset( $raw_row[ $col_blanko ] ) ? $raw_row[ $col_blanko ] : '';
+            $raw_n = isset( $raw_row[ $col_nama ] ) ? $raw_row[ $col_nama ] : '';
+            $raw_r = isset( $raw_row[ $col_reg ] ) ? $raw_row[ $col_reg ] : '';
+            $raw_s = isset( $raw_row[ $col_skema ] ) ? $raw_row[ $col_skema ] : '';
+            $raw_t = isset( $raw_row[ $col_tgl ] ) ? $raw_row[ $col_tgl ] : '';
+
+            // 1. Normalisasi Terpusat
+            $blanko = self::normalize_cert_number( $raw_b );
+            $reg    = self::normalize_cert_number( $raw_r );
+            $nama   = sanitize_text_field( trim( (string) $raw_n ) );
+            $skema  = sanitize_text_field( trim( (string) $raw_s ) );
+            $tgl    = sanitize_text_field( trim( (string) $raw_t ) );
+
+            // 2. Validasi Kehadiran & Panjang Field
+            if ( '' === $blanko ) {
+                $row_errors[] = __( 'Kode / Nomor Blanko kosong.', 'lsp-core-management' );
+            } elseif ( mb_strlen( $blanko, 'UTF-8' ) < 3 || mb_strlen( $blanko, 'UTF-8' ) > 60 ) {
+                $row_errors[] = __( 'Panjang Kode Blanko harus antara 3 hingga 60 karakter.', 'lsp-core-management' );
+            }
+
+            if ( '' === $reg ) {
+                $row_errors[] = __( 'Nomor Registrasi kosong.', 'lsp-core-management' );
+            } elseif ( mb_strlen( $reg, 'UTF-8' ) < 3 || mb_strlen( $reg, 'UTF-8' ) > 60 ) {
+                $row_errors[] = __( 'Panjang Nomor Registrasi harus antara 3 hingga 60 karakter.', 'lsp-core-management' );
+            }
+
+            if ( '' === $nama ) {
+                $row_errors[] = __( 'Nama Pemegang Sertifikat (Asesi) kosong.', 'lsp-core-management' );
+            } elseif ( mb_strlen( $nama, 'UTF-8' ) < 3 || mb_strlen( $nama, 'UTF-8' ) > 150 ) {
+                $row_errors[] = __( 'Panjang Nama Pemegang harus antara 3 hingga 150 karakter.', 'lsp-core-management' );
+            }
+
+            if ( '' === $skema ) {
+                $row_errors[] = __( 'Skema Sertifikasi kosong.', 'lsp-core-management' );
+            } elseif ( mb_strlen( $skema, 'UTF-8' ) < 3 || mb_strlen( $skema, 'UTF-8' ) > 255 ) {
+                $row_errors[] = __( 'Panjang Skema Sertifikasi harus antara 3 hingga 255 karakter.', 'lsp-core-management' );
+            }
+
+            // 3. Validasi Format & Keabsahan Tanggal Kalender (YYYY-MM-DD)
+            if ( '' === $tgl ) {
+                $row_errors[] = __( 'Tanggal Terbit kosong.', 'lsp-core-management' );
+            } else {
+                $d = DateTime::createFromFormat( 'Y-m-d', $tgl );
+                if ( ! $d || $d->format( 'Y-m-d' ) !== $tgl ) {
+                    $row_errors[] = sprintf( __( 'Format Tanggal Terbit "%s" tidak valid. Gunakan format YYYY-MM-DD (contoh: 2024-05-15).', 'lsp-core-management' ), $tgl );
+                }
+            }
+
+            // 4. Deteksi Duplikasi Antarbaris di Dalam File CSV yang Sama (Intra-CSV Duplicates)
+            if ( '' !== $blanko ) {
+                if ( isset( $seen_blanko[ $blanko ] ) ) {
+                    $row_errors[] = sprintf( __( 'Duplikasi intra-file: Nomor Blanko "%s" kembar dengan Baris %d.', 'lsp-core-management' ), $blanko, $seen_blanko[ $blanko ] );
+                }
+                if ( isset( $seen_reg[ $blanko ] ) ) {
+                    $row_errors[] = sprintf( __( 'Tabrakan intra-file: Nomor Blanko "%s" sama dengan Nomor Registrasi pada Baris %d.', 'lsp-core-management' ), $blanko, $seen_reg[ $blanko ] );
+                }
+            }
+
+            if ( '' !== $reg ) {
+                if ( isset( $seen_reg[ $reg ] ) ) {
+                    $row_errors[] = sprintf( __( 'Duplikasi intra-file: Nomor Registrasi "%s" kembar dengan Baris %d.', 'lsp-core-management' ), $reg, $seen_reg[ $reg ] );
+                }
+                if ( isset( $seen_blanko[ $reg ] ) ) {
+                    $row_errors[] = sprintf( __( 'Tabrakan intra-file: Nomor Registrasi "%s" sama dengan Nomor Blanko pada Baris %d.', 'lsp-core-management' ), $reg, $seen_blanko[ $reg ] );
+                }
+            }
+
+            $action    = 'INSERT';
+            $target_id = 0;
+
+            // 5. Pemeriksaan terhadap Database & Resolusi Target Update
+            if ( empty( $row_errors ) ) {
+                $db_blanko = self::find_certs_by_meta( 'kode_blanko', $blanko );
+                $db_reg    = self::find_certs_by_meta( 'no_registrasi', $reg );
+                $x_blanko  = self::find_certs_by_meta( 'no_registrasi', $blanko );
+                $x_reg     = self::find_certs_by_meta( 'kode_blanko', $reg );
+
+                // Deteksi ambiguitas di database
+                if ( count( $db_blanko ) > 1 || count( $db_reg ) > 1 ) {
+                    $row_errors[] = __( 'Ambiguitas di database: Nomor terdaftar pada lebih dari satu sertifikat di database.', 'lsp-core-management' );
+                }
+
+                // Resolusi aksi
+                if ( empty( $db_blanko ) && empty( $db_reg ) ) {
+                    // Record baru -> Pastikan tidak ada tabrakan cross-field
+                    if ( ! empty( $x_blanko ) ) {
+                        $row_errors[] = sprintf( __( 'Tabrakan lintas kolom: Nomor Blanko "%s" bertabrakan dengan Nomor Registrasi pada sertifikat ID %d di database.', 'lsp-core-management' ), $blanko, $x_blanko[0] );
                     }
-                    fclose( $handle );
-                    $message = '<div class="updated notice is-dismissible"><p><strong>Proses Import Selesai!</strong> Berhasil menambahkan <strong>' . $imported . '</strong> data baru dan memperbarui <strong>' . $updated . '</strong> data sertifikat.</p></div>';
+                    if ( ! empty( $x_reg ) ) {
+                        $row_errors[] = sprintf( __( 'Tabrakan lintas kolom: Nomor Registrasi "%s" bertabrakan dengan Nomor Blanko pada sertifikat ID %d di database.', 'lsp-core-management' ), $reg, $x_reg[0] );
+                    }
+                    $action = 'INSERT';
+                } elseif ( ! empty( $db_blanko ) && ! empty( $db_reg ) ) {
+                    // Kedua nomor ada di database
+                    if ( $db_blanko[0] === $db_reg[0] ) {
+                        $action    = 'UPDATE';
+                        $target_id = $db_blanko[0];
+                    } else {
+                        $row_errors[] = sprintf(
+                            __( 'Konflik identitas: Nomor Blanko terdaftar pada sertifikat ID %d, sedangkan Nomor Registrasi terdaftar pada sertifikat ID %d.', 'lsp-core-management' ),
+                            $db_blanko[0],
+                            $db_reg[0]
+                        );
+                    }
+                } elseif ( ! empty( $db_blanko ) && empty( $db_reg ) ) {
+                    $target_id = $db_blanko[0];
+                    if ( ! empty( $x_reg ) && ! in_array( $target_id, $x_reg, true ) ) {
+                        $row_errors[] = sprintf( __( 'Tabrakan lintas kolom: Nomor Registrasi "%s" bertabrakan dengan Nomor Blanko pada sertifikat ID %d di database.', 'lsp-core-management' ), $reg, $x_reg[0] );
+                    }
+                    $action = 'UPDATE';
+                } elseif ( empty( $db_blanko ) && ! empty( $db_reg ) ) {
+                    $target_id = $db_reg[0];
+                    if ( ! empty( $x_blanko ) && ! in_array( $target_id, $x_blanko, true ) ) {
+                        $row_errors[] = sprintf( __( 'Tabrakan lintas kolom: Nomor Blanko "%s" bertabrakan dengan Nomor Registrasi pada sertifikat ID %d di database.', 'lsp-core-management' ), $blanko, $x_blanko[0] );
+                    }
+                    $action = 'UPDATE';
+                }
+            }
+
+            if ( ! empty( $row_errors ) ) {
+                $status = 'SKIPPED';
+                $skipped_count++;
+            } else {
+                $status = 'VALID';
+                if ( 'INSERT' === $action ) {
+                    $valid_inserts++;
+                } else {
+                    $valid_updates++;
+                }
+                $seen_blanko[ $blanko ] = $row_number;
+                $seen_reg[ $reg ]       = $row_number;
+            }
+
+            $rows_data[] = array(
+                'row_num'           => $row_number,
+                'kode_blanko'       => $blanko,
+                'no_registrasi'     => $reg,
+                'nama_pemegang'     => $nama,
+                'skema_sertifikasi' => $skema,
+                'tanggal_terbit'    => $tgl,
+                'action'            => $action,
+                'target_id'         => $target_id,
+                'status'            => $status,
+                'errors'            => $row_errors,
+            );
+        }
+
+        fclose( $handle );
+
+        return array(
+            'success'       => true,
+            'total_rows'    => count( $rows_data ),
+            'valid_inserts' => $valid_inserts,
+            'valid_updates' => $valid_updates,
+            'skipped_count' => $skipped_count,
+            'rows'          => $rows_data,
+        );
+    }
+
+    /**
+     * Eksekusi Penyimpanan Batch Sertifikat ke Database
+     *
+     * @param array $rows Array baris yang telah divalidasi
+     * @return array Rekapitulasi hasil eksekusi
+     */
+    public static function execute_csv_import_batch( $rows ) {
+        if ( ! is_array( $rows ) || empty( $rows ) ) {
+            return array(
+                'imported'       => 0,
+                'updated'        => 0,
+                'skipped'        => 0,
+                'failed'         => 0,
+                'failed_details' => array(),
+            );
+        }
+
+        $imported       = 0;
+        $updated        = 0;
+        $skipped        = 0;
+        $failed         = 0;
+        $failed_details = array();
+
+        foreach ( $rows as $row ) {
+            if ( ! isset( $row['status'] ) || 'VALID' !== $row['status'] ) {
+                $skipped++;
+                continue;
+            }
+
+            $blanko     = $row['kode_blanko'];
+            $reg        = $row['no_registrasi'];
+            $nama       = $row['nama_pemegang'];
+            $skema      = $row['skema_sertifikasi'];
+            $tgl        = $row['tanggal_terbit'];
+            $action     = isset( $row['action'] ) ? $row['action'] : 'INSERT';
+            $auto_title = $blanko . ' - ' . $nama;
+
+            if ( 'INSERT' === $action ) {
+                $post_id = wp_insert_post( array(
+                    'post_type'   => 'data_sertifikat',
+                    'post_title'  => $auto_title,
+                    'post_status' => 'publish',
+                ), true );
+
+                if ( is_wp_error( $post_id ) || empty( $post_id ) ) {
+                    $failed++;
+                    $failed_details[] = array(
+                        'row'   => $row['row_num'],
+                        'field' => 'database_insert',
+                        'error' => is_wp_error( $post_id ) ? $post_id->get_error_message() : __( 'Gagal menambahkan post sertifikat baru.', 'lsp-core-management' ),
+                    );
+                    continue;
+                }
+
+                update_post_meta( $post_id, 'kode_blanko', $blanko );
+                update_post_meta( $post_id, 'nama_pemegang', $nama );
+                update_post_meta( $post_id, 'no_registrasi', $reg );
+                update_post_meta( $post_id, 'skema_sertifikasi', $skema );
+                update_post_meta( $post_id, 'tanggal_terbit', $tgl );
+
+                $imported++;
+            } elseif ( 'UPDATE' === $action ) {
+                $target_id = isset( $row['target_id'] ) ? intval( $row['target_id'] ) : 0;
+                if ( $target_id <= 0 ) {
+                    $failed++;
+                    $failed_details[] = array(
+                        'row'   => $row['row_num'],
+                        'field' => 'database_update',
+                        'error' => __( 'Target ID sertifikat untuk pembaruan tidak valid.', 'lsp-core-management' ),
+                    );
+                    continue;
+                }
+
+                $up_res = wp_update_post( array(
+                    'ID'         => $target_id,
+                    'post_title' => $auto_title,
+                ), true );
+
+                if ( is_wp_error( $up_res ) || empty( $up_res ) ) {
+                    $failed++;
+                    $failed_details[] = array(
+                        'row'   => $row['row_num'],
+                        'field' => 'database_update',
+                        'error' => is_wp_error( $up_res ) ? $up_res->get_error_message() : __( 'Gagal memperbarui judul post sertifikat.', 'lsp-core-management' ),
+                    );
+                    continue;
+                }
+
+                update_post_meta( $target_id, 'kode_blanko', $blanko );
+                update_post_meta( $target_id, 'nama_pemegang', $nama );
+                update_post_meta( $target_id, 'no_registrasi', $reg );
+                update_post_meta( $target_id, 'skema_sertifikasi', $skema );
+                update_post_meta( $target_id, 'tanggal_terbit', $tgl );
+
+                $updated++;
+            }
+        }
+
+        return array(
+            'imported'       => $imported,
+            'updated'        => $updated,
+            'skipped'        => $skipped,
+            'failed'         => $failed,
+            'failed_details' => $failed_details,
+        );
+    }
+
+    /**
+     * Tampilan Halaman Admin: Import CSV dengan Preflight Preview & Final Reporting
+     */
+    public function render_import_page() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( __( 'Anda tidak memiliki hak akses yang cukup untuk mengelola data sertifikat.', 'lsp-core-management' ) );
+        }
+
+        $page_state    = 'UPLOAD_FORM'; // UPLOAD_FORM | PREVIEW_TABLE | FINAL_REPORT
+        $error_message = '';
+        $preflight     = null;
+        $batch_token   = '';
+        $final_report  = null;
+
+        // TAHAP 2: Konfirmasi Eksekusi Import
+        if ( isset( $_POST['lsp_cert_import_confirm_submit'] ) && check_admin_referer( 'lsp_cert_import_confirm_action', 'lsp_cert_import_confirm_nonce' ) ) {
+            $token = isset( $_POST['lsp_batch_token'] ) ? sanitize_text_field( $_POST['lsp_batch_token'] ) : '';
+            $trans_key = 'lsp_csv_batch_' . get_current_user_id() . '_' . $token;
+            $batch_rows = get_transient( $trans_key );
+
+            if ( false !== $batch_rows && is_array( $batch_rows ) ) {
+                delete_transient( $trans_key );
+                $final_report = self::execute_csv_import_batch( $batch_rows );
+                $page_state   = 'FINAL_REPORT';
+            } else {
+                $error_message = __( 'Sesi validasi preview telah kedaluwarsa atau tidak valid. Silakan unggah kembali berkas CSV Anda.', 'lsp-core-management' );
+                $page_state    = 'UPLOAD_FORM';
+            }
+        }
+        // TAHAP 1: Unggah & Validasi Preflight
+        elseif ( isset( $_POST['lsp_cert_import_submit'] ) && check_admin_referer( 'lsp_cert_import_action', 'lsp_cert_import_nonce' ) ) {
+            if ( isset( $_FILES['csv_file'] ) ) {
+                $val_upload = self::validate_csv_upload_file( $_FILES['csv_file'] );
+                if ( ! $val_upload['valid'] ) {
+                    $error_message = $val_upload['error'];
+                } else {
+                    $parsed = self::parse_and_validate_csv_data( $_FILES['csv_file']['tmp_name'] );
+                    if ( ! $parsed['success'] ) {
+                        $error_message = $parsed['error'];
+                    } else {
+                        $preflight   = $parsed;
+                        $batch_token = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : md5( uniqid( (string) mt_rand(), true ) );
+                        set_transient( 'lsp_csv_batch_' . get_current_user_id() . '_' . $batch_token, $parsed['rows'], 900 );
+                        $page_state  = 'PREVIEW_TABLE';
+                    }
                 }
             } else {
-                $message = '<div class="error notice is-dismissible"><p>Silakan pilih file CSV terlebih dahulu.</p></div>';
+                $error_message = __( 'Silakan pilih berkas CSV terlebih dahulu.', 'lsp-core-management' );
             }
         }
         ?>
         <div class="wrap">
-            <h1><?php _e( 'Import Data Pemegang Sertifikat (CSV)', 'lsp-core-management' ); ?></h1>
-            <p><?php _e( 'Gunakan fitur ini untuk mengunggah banyak data pemegang sertifikat asesi sekaligus menggunakan file CSV / Excel.', 'lsp-core-management' ); ?></p>
-            <?php echo $message; ?>
-            <div style="background:#fff; border:1px solid #ccd0d4; padding:25px; border-radius:8px; max-width:700px; margin-top:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
-                <h3>Langkah-langkah Import:</h3>
-                <ol style="line-height:1.8; margin-bottom:20px;">
-                    <li>Unduh template file CSV terlebih dahulu: <br>
-                        <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=data_sertifikat&page=lsp-cert-import&lsp_cert_download_csv_template=1' ) ); ?>" class="button button-secondary" style="margin-top:5px;">
-                            <span class="dashicons dashicons-download" style="margin-top:4px;"></span> Unduh Template CSV Contoh
+            <h1 style="display:flex; align-items:center; gap:10px;">
+                <span class="dashicons dashicons-database-import" style="font-size:32px; width:32px; height:32px; color:#72161a;"></span>
+                <?php _e( 'Import Data Pemegang Sertifikat (CSV)', 'lsp-core-management' ); ?>
+            </h1>
+            <p><?php _e( 'Sistem import aman dengan validasi preflight, pendeteksi delimiter otomatis, normalisasi identitas, dan pencegahan duplikasi data.', 'lsp-core-management' ); ?></p>
+
+            <?php if ( ! empty( $error_message ) ) : ?>
+                <div class="notice notice-error is-dismissible" style="border-left-color:#dc2626;">
+                    <p><strong>⚠️ <?php _e( 'Gagal Memproses Berkas:', 'lsp-core-management' ); ?></strong> <?php echo esc_html( $error_message ); ?></p>
+                </div>
+            <?php endif; ?>
+
+            <?php if ( 'PREVIEW_TABLE' === $page_state && $preflight ) : ?>
+                <!-- TAMPILAN PREFLIGHT PREVIEW -->
+                <div style="background:#fff; border:1px solid #ccd0d4; padding:20px; border-radius:8px; margin-top:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+                    <h2 style="margin-top:0; border-bottom:1px solid #eee; padding-bottom:10px;">
+                        <?php _e( 'Hasil Validasi Preflight (Pratinjau Data)', 'lsp-core-management' ); ?>
+                    </h2>
+                    <p style="color:#555;">
+                        <?php _e( 'Periksa ringkasan dan status setiap baris di bawah ini. Data <strong>belum disimpan</strong> ke pangkalan data hingga Anda menekan tombol konfirmasi.', 'lsp-core-management' ); ?>
+                    </p>
+
+                    <!-- METRIC CARDS -->
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:15px; margin:20px 0;">
+                        <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:24px; font-weight:800; color:#1e293b;"><?php echo intval( $preflight['total_rows'] ); ?></div>
+                            <div style="font-size:12px; color:#64748b; font-weight:600; text-transform:uppercase; margin-top:4px;">Total Baris Data</div>
+                        </div>
+                        <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:24px; font-weight:800; color:#16a34a;"><?php echo intval( $preflight['valid_inserts'] ); ?></div>
+                            <div style="font-size:12px; color:#15803d; font-weight:600; text-transform:uppercase; margin-top:4px;">Siap Tambah Baru</div>
+                        </div>
+                        <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:24px; font-weight:800; color:#2563eb;"><?php echo intval( $preflight['valid_updates'] ); ?></div>
+                            <div style="font-size:12px; color:#1d4ed8; font-weight:600; text-transform:uppercase; margin-top:4px;">Siap Diperbarui</div>
+                        </div>
+                        <div style="background:#fef2f2; border:1px solid #fca5a5; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:24px; font-weight:800; color:#dc2626;"><?php echo intval( $preflight['skipped_count'] ); ?></div>
+                            <div style="font-size:12px; color:#b91c1c; font-weight:600; text-transform:uppercase; margin-top:4px;">Ditolak / Dilewati</div>
+                        </div>
+                    </div>
+
+                    <!-- TABEL DETAIL PREVIEW -->
+                    <div style="max-height:420px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:6px; margin-bottom:20px;">
+                        <table class="wp-list-table widefat striped" style="border:none;">
+                            <thead>
+                                <tr>
+                                    <th style="width:60px; text-align:center;">Baris</th>
+                                    <th>Nomor Blanko</th>
+                                    <th>Nomor Registrasi</th>
+                                    <th>Nama Pemegang</th>
+                                    <th>Skema Sertifikasi</th>
+                                    <th>Tanggal Terbit</th>
+                                    <th style="width:130px; text-align:center;">Rencana Aksi</th>
+                                    <th>Keterangan / Alasan</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ( $preflight['rows'] as $r ) : ?>
+                                    <tr>
+                                        <td style="text-align:center; font-weight:bold;"><?php echo intval( $r['row_num'] ); ?></td>
+                                        <td><code><?php echo esc_html( $r['kode_blanko'] ?: '—' ); ?></code></td>
+                                        <td><code><?php echo esc_html( $r['no_registrasi'] ?: '—' ); ?></code></td>
+                                        <td><strong><?php echo esc_html( $r['nama_pemegang'] ?: '—' ); ?></strong></td>
+                                        <td><?php echo esc_html( $r['skema_sertifikasi'] ?: '—' ); ?></td>
+                                        <td><?php echo esc_html( $r['tanggal_terbit'] ?: '—' ); ?></td>
+                                        <td style="text-align:center;">
+                                            <?php if ( 'VALID' === $r['status'] ) : ?>
+                                                <?php if ( 'INSERT' === $r['action'] ) : ?>
+                                                    <span style="background:#dcfce7; color:#15803d; padding:3px 8px; border-radius:4px; font-size:11px; font-weight:700;">TAMBAH BARU</span>
+                                                <?php else : ?>
+                                                    <span style="background:#dbeafe; color:#1d4ed8; padding:3px 8px; border-radius:4px; font-size:11px; font-weight:700;">UPDATE ID #<?php echo intval( $r['target_id'] ); ?></span>
+                                                <?php endif; ?>
+                                            <?php else : ?>
+                                                <span style="background:#fee2e2; color:#b91c1c; padding:3px 8px; border-radius:4px; font-size:11px; font-weight:700;">DILEWATI</span>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td>
+                                            <?php if ( ! empty( $r['errors'] ) ) : ?>
+                                                <span style="color:#dc2626; font-size:12px;"><?php echo esc_html( implode( ' | ', $r['errors'] ) ); ?></span>
+                                            <?php else : ?>
+                                                <span style="color:#16a34a; font-size:12px;">Data valid dan siap diproses.</span>
+                                            <?php endif; ?>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- TOMBOL AKSI KONFIRMASI -->
+                    <div style="display:flex; justify-content:space-between; align-items:center; padding-top:15px; border-top:1px solid #eee;">
+                        <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=data_sertifikat&page=lsp-cert-import' ) ); ?>" class="button button-secondary">
+                            &larr; <?php _e( 'Batalkan &amp; Pilih File Lain', 'lsp-core-management' ); ?>
                         </a>
-                    </li>
-                    <li>Buka template menggunakan Excel atau Spreadsheet, lalu isi kolom sesuai format (format tanggal: <code>YYYY-MM-DD</code> misal <code>2024-05-20</code>).</li>
-                    <li>Simpan kembali file dalam format <strong>CSV (Comma Delimited)</strong>.</li>
-                    <li>Pilih file di bawah ini dan klik <strong>Unggah &amp; Proses Import</strong>.</li>
-                </ol>
-                <hr style="margin:20px 0;">
-                <form method="POST" enctype="multipart/form-data">
-                    <?php wp_nonce_field( 'lsp_cert_import_action', 'lsp_cert_import_nonce' ); ?>
-                    <p>
-                        <label for="csv_file" style="font-weight:bold; display:block; margin-bottom:8px;">Pilih File CSV:</label>
-                        <input type="file" name="csv_file" id="csv_file" accept=".csv" required />
+
+                        <?php $total_valid = $preflight['valid_inserts'] + $preflight['valid_updates']; ?>
+                        <?php if ( $total_valid > 0 ) : ?>
+                            <form method="POST">
+                                <?php wp_nonce_field( 'lsp_cert_import_confirm_action', 'lsp_cert_import_confirm_nonce' ); ?>
+                                <input type="hidden" name="lsp_batch_token" value="<?php echo esc_attr( $batch_token ); ?>" />
+                                <button type="submit" name="lsp_cert_import_confirm_submit" class="button button-primary button-hero" style="background:#16a34a; border-color:#15803d;">
+                                    <span class="dashicons dashicons-yes-alt" style="margin-top:5px;"></span>
+                                    <?php printf( __( 'Konfirmasi &amp; Proses Import (%d Data)', 'lsp-core-management' ), $total_valid ); ?>
+                                </button>
+                            </form>
+                        <?php else : ?>
+                            <div style="color:#dc2626; font-weight:bold;">
+                                ⚠️ <?php _e( 'Tidak ada baris data valid yang dapat disimpan.', 'lsp-core-management' ); ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+            <?php elseif ( 'FINAL_REPORT' === $page_state && $final_report ) : ?>
+                <!-- TAMPILAN LAPORAN HASIL IMPORT (FINAL REPORT) -->
+                <div style="background:#fff; border:1px solid #ccd0d4; padding:25px; border-radius:8px; margin-top:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+                    <h2 style="margin-top:0; color:#15803d; display:flex; align-items:center; gap:8px;">
+                        <span class="dashicons dashicons-saved" style="font-size:28px; width:28px; height:28px;"></span>
+                        <?php _e( 'Proses Import Selesai Dijalankan!', 'lsp-core-management' ); ?>
+                    </h2>
+                    <p style="color:#555;">
+                        <?php _e( 'Berikut rekapitulasi data yang berhasil disimpan atau diperbarui pada pangkalan data WordPress:', 'lsp-core-management' ); ?>
                     </p>
-                    <p style="margin-top:20px;">
-                        <input type="submit" name="lsp_cert_import_submit" class="button button-primary button-large" value="Unggah &amp; Proses Import" />
-                    </p>
-                </form>
-            </div>
+
+                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:15px; margin:20px 0;">
+                        <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:28px; font-weight:800; color:#16a34a;"><?php echo intval( $final_report['imported'] ); ?></div>
+                            <div style="font-size:12px; color:#15803d; font-weight:600; text-transform:uppercase; margin-top:4px;">Data Baru (Imported)</div>
+                        </div>
+                        <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:28px; font-weight:800; color:#2563eb;"><?php echo intval( $final_report['updated'] ); ?></div>
+                            <div style="font-size:12px; color:#1d4ed8; font-weight:600; text-transform:uppercase; margin-top:4px;">Diperbarui (Updated)</div>
+                        </div>
+                        <div style="background:#fffbeb; border:1px solid #fde68a; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:28px; font-weight:800; color:#d97706;"><?php echo intval( $final_report['skipped'] ); ?></div>
+                            <div style="font-size:12px; color:#b45309; font-weight:600; text-transform:uppercase; margin-top:4px;">Dilewati (Skipped)</div>
+                        </div>
+                        <div style="background:#fef2f2; border:1px solid #fca5a5; border-radius:6px; padding:15px; text-align:center;">
+                            <div style="font-size:28px; font-weight:800; color:#dc2626;"><?php echo intval( $final_report['failed'] ); ?></div>
+                            <div style="font-size:12px; color:#b91c1c; font-weight:600; text-transform:uppercase; margin-top:4px;">Gagal DB (Failed)</div>
+                        </div>
+                    </div>
+
+                    <?php if ( ! empty( $final_report['failed_details'] ) ) : ?>
+                        <div style="margin-top:20px;">
+                            <h3 style="color:#b91c1c;"><?php _e( 'Rincian Kegagalan Database:', 'lsp-core-management' ); ?></h3>
+                            <table class="wp-list-table widefat striped">
+                                <thead>
+                                    <tr>
+                                        <th style="width:70px;">Baris</th>
+                                        <th>Operasi</th>
+                                        <th>Pesan Kesalahan</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ( $final_report['failed_details'] as $fd ) : ?>
+                                        <tr>
+                                            <td><?php echo intval( $fd['row'] ); ?></td>
+                                            <td><code><?php echo esc_html( $fd['field'] ); ?></code></td>
+                                            <td style="color:#dc2626;"><?php echo esc_html( $fd['error'] ); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+
+                    <div style="margin-top:25px; display:flex; gap:10px;">
+                        <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=data_sertifikat' ) ); ?>" class="button button-primary">
+                            <?php _e( 'Lihat Daftar Sertifikat', 'lsp-core-management' ); ?>
+                        </a>
+                        <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=data_sertifikat&page=lsp-cert-import' ) ); ?>" class="button button-secondary">
+                            <?php _e( 'Import Berkas CSV Baru', 'lsp-core-management' ); ?>
+                        </a>
+                    </div>
+                </div>
+
+            <?php else : ?>
+                <!-- TAMPILAN FORMULIR UNGGAH AWAL -->
+                <div style="background:#fff; border:1px solid #ccd0d4; padding:25px; border-radius:8px; max-width:750px; margin-top:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+                    <h3 style="margin-top:0;"><?php _e( 'Panduan Import Sertifikat:', 'lsp-core-management' ); ?></h3>
+                    <ol style="line-height:1.8; margin-bottom:20px;">
+                        <li>Unduh template file CSV resmi: <br>
+                            <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=data_sertifikat&page=lsp-cert-import&lsp_cert_download_csv_template=1' ) ); ?>" class="button button-secondary" style="margin-top:5px;">
+                                <span class="dashicons dashicons-download" style="margin-top:4px;"></span> <?php _e( 'Unduh Template CSV Resmi', 'lsp-core-management' ); ?>
+                            </a>
+                        </li>
+                        <li>Isi data asesi pada spreadsheet. Format tanggal wajib <code>YYYY-MM-DD</code> (contoh: <code>2024-05-20</code>).</li>
+                        <li>Simpan berkas dalam format <strong>CSV (Comma Delimited)</strong> atau dipisahkan titik koma (<code>;</code>).</li>
+                        <li>Unggah berkas di bawah. Sistem akan menjalankan <strong>pratinjau &amp; validasi preflight</strong> sebelum data dimasukkan ke pangkalan data.</li>
+                    </ol>
+
+                    <hr style="margin:20px 0; border:0; border-top:1px solid #eee;">
+
+                    <form method="POST" enctype="multipart/form-data">
+                        <?php wp_nonce_field( 'lsp_cert_import_action', 'lsp_cert_import_nonce' ); ?>
+                        <div style="margin-bottom:20px;">
+                            <label for="csv_file" style="font-weight:bold; display:block; margin-bottom:8px; font-size:14px;">
+                                <?php _e( 'Pilih Berkas CSV:', 'lsp-core-management' ); ?>
+                            </label>
+                            <input type="file" name="csv_file" id="csv_file" accept=".csv,text/csv,text/plain" required style="display:block;" />
+                            <p class="description" style="margin-top:6px; color:#666;">
+                                <?php _e( 'Format didukung: .csv (pemisah koma atau titik koma). Ukuran berkas maksimal 5 MB.', 'lsp-core-management' ); ?>
+                            </p>
+                        </div>
+
+                        <p style="margin:0;">
+                            <input type="submit" name="lsp_cert_import_submit" class="button button-primary button-large" value="<?php esc_attr_e( 'Unggah & Validasi (Pratinjau)', 'lsp-core-management' ); ?>" />
+                        </p>
+                    </form>
+                </div>
+            <?php endif; ?>
         </div>
         <?php
     }

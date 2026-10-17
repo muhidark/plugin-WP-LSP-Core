@@ -1,50 +1,26 @@
-# AUDIT LAPORAN 02: SECURITY AUDIT
+# AUDIT LAPORAN 02: SECURITY AUDIT (VALIDATED)
 **Plugin:** LSP Core Management & Sertifikat Checker (`lsp-core-management`)  
 **Lingkup:** Input Validation, Output Escaping, CSRF, Authorization, Endpoint Publik, Verifikasi Sertifikat, CSV Import  
 **Standar Evaluasi:** WordPress Plugin Security Standards, OWASP Top 10, CWE / ASVS  
-**Status:** Audit Selesai (Temuan Teknis Diverifikasi Berdasarkan Kode Aktual)  
+**Status:** Divalidasi Ulang & Terkalibrasi (17 Oktober 2026)  
 
 ---
 
-## 1. DAFTAR TEMUAN KEAMANAN (FINDINGS)
+## 1. REKAPITULASI TEMUAN KEAMANAN & DATA INTEGRITY
 
-### FINDING ID: SEC-01
-- **SEVERITY:** HIGH
-- **CATEGORY:** CSRF / Unprotected Public AJAX Handler
-- **FILE:** `lsp-core-management.php`
-- **LINE:** 2658 - 2663
-- **AFFECTED FUNCTION:** `LSP_Core_Management::ajax_verify_cert()`
-- **DESCRIPTION:**  
-  Endpoint AJAX publik `lsp_verify_cert` yang didaftarkan untuk pengguna anonim (`nopriv`) dan pengguna login (`wp_ajax`) tidak memvalidasi token nonce sama sekali di sisi server. Walaupun skrip frontend JavaScript pada shortcode `[cek_sertifikat]` mengirimkan parameter `formData.append('nonce', '...')`, server handler tidak memanggil `check_ajax_referer()` atau `wp_verify_nonce()`.
-- **TECHNICAL EVIDENCE:**
-  ```php
-  // lsp-core-management.php:2658
-  public function ajax_verify_cert() {
-      $kode_blanko = isset( $_POST['kode_blanko'] ) ? sanitize_text_field( trim( $_POST['kode_blanko'] ) ) : '';
-      if ( empty( $kode_blanko ) ) {
-          wp_send_json_error( array( 'html' => '...' ) );
-      }
-      // Langsung mengeksekusi WP_Query tanpa pemeriksaan nonce
-  ```
-- **ROOT CAUSE:** Pengembang mengabaikan pemanggilan `check_ajax_referer( 'lsp_verify_cert_nonce', 'nonce' )` di awal fungsi AJAX.
-- **IMPACT:** Endpoint dapat diserang via cross-origin scripted POST requests atau automated bot scraping tanpa batasan session handshake.
-- **EXPLOITABILITY:** Mudah (Trivial). Cukup kirim HTTP POST ke `/wp-admin/admin-ajax.php` dengan action `lsp_verify_cert`.
-- **RECOMMENDED FIX:**  
-  Tambahkan validasi nonce di baris pertama fungsi `ajax_verify_cert()`:
-  ```php
-  if ( ! check_ajax_referer( 'lsp_verify_cert_nonce', 'nonce', false ) ) {
-      wp_send_json_error( array(
-          'html' => '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">Sesi verifikasi tidak valid atau telah kedaluwarsa. Silakan muat ulang halaman.</div>'
-      ) );
-  }
-  ```
-- **COMPATIBILITY RISK:** Sangat Rendah. Form frontend resmi sudah mengirimkan parameter `nonce`.
-- **TEST PLAN:**  
-  1. Kirim request POST tanpa parameter `nonce` -> Respon harus error 403 atau JSON error.
-  2. Kirim request POST dengan nonce salah -> Respon harus ditolak.
-  3. Kirim request melalui form web resmi dengan nonce valid -> Berhasil diproses.
+| ID | Severity | Kategori | File | Baris | Fungsi |
+|---|---|---|---|---|---|
+| **SEC-02** | **CRITICAL** | Business Logic / Data Exposure | `lsp-core-management.php` | 2675–2686 | `ajax_verify_cert()` |
+| **SEC-03** | **HIGH** | DoS / Brute-force Enumeration | `lsp-core-management.php` | 2658–2674 | `ajax_verify_cert()` |
+| **SEC-04** | **HIGH** | Insecure File Upload | `lsp-core-management.php` | 1963–1967 | `render_import_page()` |
+| **SEC-01** | **MEDIUM** | Missing Nonce on Public AJAX | `lsp-core-management.php` | 2658–2663 | `ajax_verify_cert()` |
+| **SEC-05** | **MEDIUM** | Input Sanitization Hygiene | `lsp-core-management.php` | 327–348, 633–642, 786–790, 1198–1232 | Handlers `save_*_meta()` |
+| **SEC-06** | **MEDIUM** | Output Integrity & Data Exposure | `lsp-core-management.php` | 2708, 2723, 2770 | `ajax_verify_cert()` |
+| **DATA-01**| **MEDIUM** | Data Integrity / Uniqueness | `lsp-core-management.php` | 780–807 | `save_cert_meta()` |
 
 ---
+
+## 2. DETAIL TEKNIS SETIAP TEMUAN
 
 ### FINDING ID: SEC-02
 - **SEVERITY:** CRITICAL
@@ -70,18 +46,17 @@
       ) );
   }
   ```
-- **ROOT CAUSE:** Kesalahan konsepsi bahwa pencarian verifikasi publik disamakan dengan fitur mesin pencari teks (search engine) yang fleksibel, alih-alih validasi identitas keabsahan dokumen hukum negara.
+- **ROOT CAUSE:** Penggunaan kueri fuzzy search `LIKE` pada sistem pembuktian keabsahan hukum sertifikat kompetensi.
 - **IMPACT:**  
-  1. **Integritas Dokumen Hancur:** Seseorang yang memiliki nomor sertifikat palsu yang hanya menyerupai sebagian nomor asli dapat mengklaim sertifikatnya terverifikasi resmi oleh sistem.
-  2. **Data Leakage:** Siapapun dapat mencuri/melakukan enumerasi identitas asesi pemegang sertifikat, nomor registrasi, dan skema sertifikasi dengan memasukkan karakter acak.
-- **EXPLOITABILITY:** Sangat Mudah (Trivial). Terjadi langsung melalui antarmuka web publik.
+  1. Sertifikat palsu/tidak sah dapat dinyatakan valid secara resmi oleh website LSP hanya karena memiliki kesamaan beberapa karakter dengan sertifikat asesi lain.
+  2. Kebocoran data pribadi pemegang sertifikat sah kepada pihak yang melakukan pencarian acak.
+- **EXPLOITABILITY:** Sangat Mudah (Trivial). Cukup masukkan satu karakter umum di kotak pencarian publik.
 - **RECOMMENDED FIX:**  
-  Hapus seluruh blok fallback query `LIKE`. Verifikasi wajib menggunakan pencarian eksak (`=`) terhadap `kode_blanko` atau `no_registrasi` yang telah dinormalisasi (menghilangkan spasi berlebih tanpa merusak format tanda baca resmi).
-- **COMPATIBILITY RISK:** Rendah. Pengguna yang memiliki nomor sertifikat sah akan tetap terverifikasi 100% akurat.
-- **TEST PLAN:**  
-  1. Input `K` atau `1` -> Verifier wajib menyatakan: "TIDAK DITEMUKAN / TIDAK VALID".
-  2. Input nomor sertifikat sebagian (contoh: `K24.01`) -> Wajib ditolak.
-  3. Input nomor sertifikat lengkap persis (`K24.01.0001`) -> Sukses terverifikasi sebagai sertifikat pemilik asli.
+  Hapus seluruh blok fallback kueri `LIKE`. Gunakan pencarian eksak (`=`) terhadap `kode_blanko` atau `no_registrasi`. Normalisasikan spasi dan huruf besar tanpa mengubah karakter tanda baca nomor sertifikat. Jika terdapat hasil duplikat identik, tangani secara aman tanpa menyatakan salah satu secara ambigu.
+- **REGRESSION RISK:** Rendah. Pengguna yang memiliki nomor sertifikat sah akan tetap terverifikasi dengan benar.
+- **TEST CASE:**  
+  - Input: `K`, `1`, `KOM` -> Expected: Ditolak / Tidak Ditemukan.
+  - Input: `K24.01.0001` (lengkap) -> Expected: Ditemukan tepat dan valid.
 
 ---
 
@@ -92,28 +67,18 @@
 - **LINE:** 2658 - 2674
 - **AFFECTED FUNCTION:** `LSP_Core_Management::ajax_verify_cert()`
 - **DESCRIPTION:**  
-  Endpoint publik verifikasi sertifikat tidak memiliki mekanisme pembatasan frekuensi request (Rate Limiting) dan tidak membatasi panjang karakter string input. Penyerang dapat membuat bot untuk mengirimkan ribuan request per menit guna membebani database server (exhausting DB connection pool) atau menyalin seluruh database asesi secara otomatis.
+  Endpoint publik `ajax_verify_cert()` tidak memiliki mekanisme pembatasan frekuensi request (Rate Limiting) dan tidak membatasi panjang input pengguna. Penyerang dapat mengirimkan puluhan request per detik untuk enumerasi data atau melumpuhkan koneksi database MySQL melalui kueri berulang.
 - **TECHNICAL EVIDENCE:**  
-  Tidak ada pemeriksaan Transient API, Object Cache, maupun pengecekan `strlen( $kode_blanko )` di dalam `ajax_verify_cert()`.
-- **ROOT CAUSE:** Ketiadaan rate limiting layer di tingkat aplikasi WordPress.
-- **IMPACT:** Potensi downtime hosting, CPU throttling dari shared hosting, dan database scraping.
-- **EXPLOITABILITY:** Mudah melalui automated Python / cURL script.
+  Tidak ada pemeriksaan pembatasan request (Transient/Object Cache) dan tidak ada pengecekan panjang string (`mb_strlen`) pada `$_POST['kode_blanko']`.
+- **ROOT CAUSE:** Ketiadaan rate limiting layer di level handler endpoint AJAX publik.
+- **IMPACT:** Penipisan resource server, database connection exhaustion, dan potensi scraping data pemegang sertifikat secara massal.
+- **EXPLOITABILITY:** Mudah melalui automated cURL / script.
 - **RECOMMENDED FIX:**  
-  1. Tambahkan sanitasi panjang input: jika panjang string > 60 karakter atau < 3 karakter, tolak request secara aman.
-  2. Implementasikan transient rate limiter berbasis IP aman (misal: maksimum 20 request per menit per alamat IP).
-  ```php
-  $client_ip = sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '' );
-  $rate_key  = 'lsp_cert_rate_' . md5( $client_ip );
-  $attempts  = (int) get_transient( $rate_key );
-  if ( $attempts > 20 ) {
-      wp_send_json_error( array(
-          'html' => '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">Terlalu banyak permintaan verifikasi. Silakan tunggu 1 menit sebelum mencoba kembali.</div>'
-      ) );
-  }
-  set_transient( $rate_key, $attempts + 1, 60 );
-  ```
-- **COMPATIBILITY RISK:** Nol. Penggunaan normal manusia (1-3 pencarian) tidak akan pernah menyentuh limit 20 request/menit.
-- **TEST PLAN:** Jalankan loop script 25 request dalam 10 detik; request ke-21 ke atas wajib menerima pesan limitasi.
+  1. Batasi panjang input (minimal 3 karakter, maksimal 60 karakter).
+  2. Implementasikan rate limiter berbasis WordPress Transients dengan batas awal 20 request/menit per hash IP client yang divalidasi dengan aman (tidak langsung mempercayai header spoofable seperti `X-Forwarded-For`).
+  3. Kembalikan kode status HTTP 429 atau respons JSON terstruktur saat limit terlampaui.
+- **REGRESSION RISK:** Rendah, pengguna sah manusia tidak melakukan lebih dari 3-5 pencarian per menit.
+- **TEST CASE:** Jalankan script 25 request dalam 10 detik; request ke-21 wajib menerima respons rate limit terlampaui.
 
 ---
 
@@ -124,12 +89,11 @@
 - **LINE:** 1963 - 1967
 - **AFFECTED FUNCTION:** `LSP_Core_Management::render_import_page()`
 - **DESCRIPTION:**  
-  Proses import CSV pada halaman admin membaca `$_FILES['csv_file']['tmp_name']` tanpa melakukan:
-  1. Validasi error status file upload (`$_FILES['csv_file']['error'] === UPLOAD_ERR_OK`).
-  2. Pengecekan ekstensi file (`.csv`).
-  3. Pengecekan MIME type (`text/csv`, `text/plain`, `application/vnd.ms-excel`).
-  4. Batas maksimal ukuran file (Max File Size).
-  5. Validasi integritas berkas sementara sebelum dibuka menggunakan `fopen()`.
+  File import CSV diproses langsung dari `$_FILES['csv_file']['tmp_name']` tanpa memvalidasi:
+  1. Error status upload (`$_FILES['csv_file']['error'] === UPLOAD_ERR_OK`).
+  2. Ekstensi file (`.csv`).
+  3. Validasi MIME type di server (`text/csv`, `text/plain`, `application/vnd.ms-excel`).
+  4. Batas ukuran file (Max File Size).
 - **TECHNICAL EVIDENCE:**
   ```php
   // lsp-core-management.php:1964
@@ -137,70 +101,104 @@
       $file   = $_FILES['csv_file']['tmp_name'];
       $handle = fopen( $file, 'r' );
   ```
-- **ROOT CAUSE:** Mengasumsikan atribut HTML `<input type="file" accept=".csv">` sudah memadai untuk keamanan sisi server.
-- **IMPACT:** Administrator atau user terkompromi dapat mengunggah file non-CSV berukuran sangat besar yang memicu crash pada parser `fgetcsv` atau file binary tak terduga.
-- **EXPLOITABILITY:** Membutuhkan hak akses `manage_options`, namun merupakan pelanggaran standar keamanan WordPress Secure Uploading.
+- **ROOT CAUSE:** Mengandalkan atribut `<input accept=".csv">` di browser tanpa validasi server-side yang kuat.
+- **IMPACT:** Risiko memory exhaustion dan server error jika diunggah file binary sangat besar atau file non-CSV.
+- **EXPLOITABILITY:** Membutuhkan hak akses administrator (`manage_options`).
 - **RECOMMENDED FIX:**  
-  Gunakan validasi berlapis:
+  Validasi status upload error, ekstensi dengan `pathinfo()`, MIME type dengan `wp_check_filetype_and_ext()`, dan batasi ukuran file maksimal 5MB.
+- **REGRESSION RISK:** Rendah. File CSV valid tetap diproses normal.
+- **TEST CASE:** Unggah file non-CSV atau file berukuran 10MB; verifikasi pesan penolakan yang ramah dan aman.
+
+---
+
+### FINDING ID: SEC-01
+- **SEVERITY:** MEDIUM *(Dikalibrasi dari temuan awal)*
+- **CATEGORY:** Missing CSRF Nonce on Public Read-Only Endpoint
+- **FILE:** `lsp-core-management.php`
+- **LINE:** 2658 - 2663
+- **AFFECTED FUNCTION:** `LSP_Core_Management::ajax_verify_cert()`
+- **DESCRIPTION:**  
+  Endpoint AJAX `lsp_verify_cert` tidak memverifikasi nonce yang dikirim dari klien. Karena endpoint ini bersifat publik dan hanya membaca data (read-only), tidak ada perubahan state atau data sensitif pengguna login yang dimanipulasi (tidak ada true CSRF privilege escalation). Namun, verifikasi nonce tetap dibutuhkan sebagai pertahanan lapis pertama untuk mencegah eksekusi form liar dari situs eksternal.
+- **TECHNICAL EVIDENCE:**
+  Form frontend shortcode mengirimkan parameter `nonce`, namun di PHP `ajax_verify_cert()` tidak terdapat pemanggilan `check_ajax_referer()` atau `wp_verify_nonce()`.
+- **ROOT CAUSE:** Ketiadaan verifikasi token handshake di server handler.
+- **IMPACT:** Endpoint dapat ditembak langsung oleh form pihak ketiga tanpa batasan origin.
+- **RECOMMENDED FIX:**  
+  Tambahkan verifikasi nonce:
   ```php
-  if ( ! isset( $_FILES['csv_file'] ) || $_FILES['csv_file']['error'] !== UPLOAD_ERR_OK ) {
-      // Tolak dengan pesan error spesifik
-  }
-  if ( $_FILES['csv_file']['size'] > 5 * 1024 * 1024 ) { // Maks 5 MB
-      // Tolak berkas terlalu besar
-  }
-  $check = wp_check_filetype_and_ext( $_FILES['csv_file']['tmp_name'], $_FILES['csv_file']['name'], array( 'csv' => 'text/csv' ) );
-  if ( ! $check['ext'] ) {
-      // Tolak berkas yang bukan CSV murni
+  if ( ! check_ajax_referer( 'lsp_verify_cert_nonce', 'nonce', false ) ) {
+      wp_send_json_error( array(
+          'html' => '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">Sesi verifikasi telah kedaluwarsa atau tidak valid. Silakan muat ulang halaman.</div>'
+      ), 403 );
   }
   ```
-- **COMPATIBILITY RISK:** Nol.
-- **TEST PLAN:** Unggah file berekstensi non-csv atau file melebihi 5MB; verifikasi bahwa sistem menolak dengan pesan informatif.
+- **REGRESSION RISK:** Rendah, karena form resmi frontend sudah menyertakan nonce yang valid.
+- **TEST CASE:** Kirim POST tanpa nonce atau nonce salah; verifikasi permintaan ditolak dengan respons yang jelas.
 
 ---
 
 ### FINDING ID: SEC-05
 - **SEVERITY:** MEDIUM
-- **CATEGORY:** Input Sanitization Hygiene / Double-Escaping Slashes
+- **CATEGORY:** Input Sanitization Hygiene / Accumulating Slashes
 - **FILE:** `lsp-core-management.php`
-- **LINE:** 327 - 348, 633 - 642, 786 - 790, 1198 - 1232
+- **LINE:** 327–348, 633–642, 786–790, 1198–1232
 - **AFFECTED FUNCTION:** `save_skema_meta()`, `save_tuk_meta()`, `save_cert_meta()`, `save_asesor_user_profile_fields()`
 - **DESCRIPTION:**  
-  WordPress secara global mengaplikasikan `magic quotes` (`add_magic_quotes`) pada seluruh superglobal `$_POST`. Pada saat menyimpan metadata, fungsi-fungsi di atas memanggil `sanitize_text_field( $_POST[...] )` atau `wp_kses_post( $_POST[...] )` tanpa memanggil `wp_unslash()` terlebih dahulu. Akibatnya, setiap karakter kutip (petik satu `'`, petik dua `"`, dan garis miring terbalik `\`) akan bertambah garis miringnya secara berulang (misal: `O\'Connor` menjadi `O\\\'Connor`) setiap kali disimpan ulang.
+  WordPress secara default menambahkan escape slashes ke superglobal `$_POST`. Pada saat menyimpan metadata, handler memanggil `sanitize_text_field( $_POST[...] )` tanpa memanggil `wp_unslash()` terlebih dahulu. Akibatnya, karakter tanda petik (`'`, `"`) atau backslash (`\`) akan terakumulasi menjadi ganda (`O\'Neil` menjadi `O\\\'Neil`) setiap kali disimpan ulang di admin.
 - **TECHNICAL EVIDENCE:**
   ```php
-  // lsp-core-management.php:786-790
-  $kode_blanko    = isset( $_POST['kode_blanko'] ) ? sanitize_text_field( trim( $_POST['kode_blanko'] ) ) : '';
-  $nama_pemegang  = isset( $_POST['nama_pemegang'] ) ? sanitize_text_field( trim( $_POST['nama_pemegang'] ) ) : '';
+  // lsp-core-management.php:786-787
+  $kode_blanko   = isset( $_POST['kode_blanko'] ) ? sanitize_text_field( trim( $_POST['kode_blanko'] ) ) : '';
+  $nama_pemegang = isset( $_POST['nama_pemegang'] ) ? sanitize_text_field( trim( $_POST['nama_pemegang'] ) ) : '';
   ```
-- **ROOT CAUSE:** Kelalaian membersihkan slashes default WordPress sebelum sanitasi.
-- **IMPACT:** Kerusakan string nama asesi, judul unit kompetensi, dan alamat TUK yang mengandung tanda petik atau simbol.
-- **EXPLOITABILITY:** Dampak integritas data (non-exploit).
+- **ROOT CAUSE:** Mengabaikan konvensi WordPress `wp_unslash()` sebelum sanitasi.
+- **IMPACT:** Kerusakan string data nama asesi, alamat TUK, dan persyaratan skema saat diperbarui berkali-kali.
 - **RECOMMENDED FIX:**  
-  Gunakan pola standar WordPress:
-  `sanitize_text_field( wp_unslash( $_POST['field_name'] ) )`
-- **COMPATIBILITY RISK:** Nol. Justru mencegah kerusakan data teks.
-- **TEST PLAN:** Simpan nama pemegang: `D'Angelo "Master" & O'Neil`; pastikan tersimpan rapi tanpa backslash tambahan.
+  Terapkan `wp_unslash()` sebelum sanitasi: `sanitize_text_field( wp_unslash( trim( $_POST['...'] ) ) )`.
+- **REGRESSION RISK:** Nol.
+- **TEST CASE:** Simpan data dengan tanda petik; pastikan tidak ada akumulasi backslash ganda di database.
 
 ---
 
 ### FINDING ID: SEC-06
 - **SEVERITY:** MEDIUM
-- **CATEGORY:** Data Protection / Public Response Minimization
+- **CATEGORY:** Output Integrity & Data Exposure
 - **FILE:** `lsp-core-management.php`
-- **LINE:** 2720 - 2753
-- **AFFECTED FUNCTION:** `ajax_verify_cert()`
+- **LINE:** 2708, 2723, 2770
+- **AFFECTED FUNCTION:** `LSP_Core_Management::ajax_verify_cert()`
 - **DESCRIPTION:**  
-  Tabel respon verifikasi publik menampilkan: Nomor Blanko, Nama Pemegang, Nomor Registrasi, Skema Sertifikasi, Tanggal Terbit, dan Tanggal Kadaluarsa. Pada baris status header (line 2708), sistem menampilkan `$kode_blanko` yang diketik oleh pengguna, bukan nomor blanko yang sebenarnya tersimpan di database post.
+  Pada tampilan kartu hasil verifikasi, sistem mencetak string input yang diketikkan pengguna (`$kode_blanko`), bukan nomor blanko resmi yang tersimpan di database post (`$db_blanko`). Jika pengguna mencari dengan nomor registrasi atau string dengan spasi berbeda, badge dan tabel menampilkan nomor yang diketik user alih-alih identitas resmi dari database.
 - **TECHNICAL EVIDENCE:**
   ```php
   // lsp-core-management.php:2708
   <span style="font-size:13px; font-weight:600; opacity:0.9;">No. Blanko: <?php echo esc_html( $kode_blanko ); ?></span>
+  // lsp-core-management.php:2724
+  <td class="cert-data-value"><code><?php echo esc_html( $kode_blanko ); ?></code></td>
   ```
-- **ROOT CAUSE:** Menampilkan variabel input `$_POST['kode_blanko']` alih-alih nilai metadata resmi `$db_blanko`.
-- **IMPACT:** Menimbulkan distorsi tampilan jika input pencarian adalah nomor registrasi atau string dengan spasi berbeda.
+- **ROOT CAUSE:** Merender variabel input mentah alih-alih metadata yang diambil dari `$post_id`.
+- **IMPACT:** Ketidaksesuaian data verifikasi resmi dan potensi distorsi informasi hasil cetak sertifikat.
 - **RECOMMENDED FIX:**  
-  Gunakan nilai metadata resmi yang diambil dari database `$db_blanko = get_post_meta( $post_id, 'kode_blanko', true );` pada seluruh blok hasil verifikasi.
-- **COMPATIBILITY RISK:** Nol.
-- **TEST PLAN:** Cari menggunakan nomor registrasi; verifikasi bahwa nomor blanko yang muncul di badge hasil adalah nomor blanko yang sesuai dari basis data.
+  Ambil nomor blanko resmi dari database:
+  `$official_blanko = get_post_meta( $post_id, 'kode_blanko', true );`
+  dan tampilkan variabel ini pada kartu hasil verifikasi.
+- **REGRESSION RISK:** Nol.
+- **TEST CASE:** Verifikasi sertifikat menggunakan nomor registrasi; kartu hasil wajib menampilkan nomor blanko resmi dari database.
 
+---
+
+### FINDING ID: DATA-01
+- **SEVERITY:** MEDIUM
+- **CATEGORY:** Data Integrity / Lack of Duplicate Validation
+- **FILE:** `lsp-core-management.php`
+- **LINE:** 780 - 807
+- **AFFECTED FUNCTION:** `LSP_Core_Management::save_cert_meta()`
+- **DESCRIPTION:**  
+  Ketika administrator menambahkan atau mengedit data sertifikat secara manual melalui form admin post editor, tidak ada pemeriksaan apakah nomor blanko tersebut sudah dipakai oleh post sertifikat lain. Jika terjadi duplikasi, verifier publik berisiko mengalami ambiguitas (dua pemilik dengan nomor blanko sama).
+- **TECHNICAL EVIDENCE:**  
+  Fungsi `save_cert_meta()` langsung memanggil `update_post_meta( $post_id, 'kode_blanko', $kode_blanko )` tanpa verifikasi apakah ada post ID lain dengan meta key `kode_blanko` yang bernilai sama.
+- **ROOT CAUSE:** Ketiadaan validasi keunikan nomor blanko pada event `save_post_data_sertifikat`.
+- **IMPACT:** Inkonsistensi data manual di database WordPress.
+- **RECOMMENDED FIX:**  
+  Tambahkan pengecekan duplikasi pada `save_cert_meta()` dan berikan admin notice/transient error jika nomor blanko sudah digunakan oleh post lain.
+- **REGRESSION RISK:** Rendah.
+- **TEST CASE:** Coba buat dua sertifikat dengan nomor blanko identik; pastikan sistem memberikan peringatan duplikasi.

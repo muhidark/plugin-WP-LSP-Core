@@ -2615,8 +2615,9 @@ class LSP_Core_Management {
                 body: formData
             })
             .then(function(res) {
-                if (!res.ok) throw new Error('HTTP Status ' + res.status);
-                return res.json();
+                return res.json().catch(function() {
+                    return { success: false, data: { html: '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">Terjadi kesalahan komunikasi dengan server (Status: ' + res.status + ').</div>' } };
+                });
             })
             .then(function(response) {
                 btn.disabled = false;
@@ -2655,60 +2656,154 @@ class LSP_Core_Management {
      * 8. AJAX VERIFIKASI SERTIFIKAT
      * ====================================================================
      */
+    /**
+     * Helper: Dapatkan Alamat IP Client secara Aman untuk Rate Limiting
+     */
+    private function get_client_ip() {
+        $ip = isset( $_SERVER['REMOTE_ADDR'] ) ? trim( (string) $_SERVER['REMOTE_ADDR'] ) : '';
+        if ( filter_var( $ip, FILTER_VALIDATE_IP ) ) {
+            return $ip;
+        }
+        return '127.0.0.1';
+    }
+
     public function ajax_verify_cert() {
-        $kode_blanko = isset( $_POST['kode_blanko'] ) ? sanitize_text_field( trim( $_POST['kode_blanko'] ) ) : '';
-        if ( empty( $kode_blanko ) ) {
-            wp_send_json_error( array( 'html' => '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">Nomor blanko tidak boleh kosong.</div>' ) );
+        // 1. Verifikasi Token Keamanan Nonce
+        if ( ! check_ajax_referer( 'lsp_verify_cert_nonce', 'nonce', false ) ) {
+            wp_send_json_error( array(
+                'html' => '<div class="cert-result-card" style="padding:25px; text-align:center; color:#cf1322;">
+                    <i class="fas fa-shield-alt" style="font-size:36px; margin-bottom:12px; display:block;"></i>
+                    <h3 style="color:#b91c1c; margin-bottom:8px;">Sesi Verifikasi Tidak Valid</h3>
+                    <p style="color:#666; font-size:14px; margin:0;">Token keamanan telah kedaluwarsa atau tidak valid. Silakan muat ulang (refresh) halaman ini dan coba kembali.</p>
+                </div>'
+            ), 403 );
         }
 
+        // 2. Rate Limiting Aman (Maksimal 20 request per menit per hash IP)
+        $client_ip = $this->get_client_ip();
+        $rate_key  = 'lsp_rl_' . md5( $client_ip );
+        $attempts  = (int) get_transient( $rate_key );
+
+        if ( $attempts >= 20 ) {
+            wp_send_json_error( array(
+                'html' => '<div class="cert-result-card" style="padding:25px; text-align:center; color:#cf1322;">
+                    <i class="fas fa-hourglass-half" style="font-size:36px; margin-bottom:12px; display:block; color:#d97706;"></i>
+                    <h3 style="color:#b45309; margin-bottom:8px;">Batas Permintaan Terlampaui</h3>
+                    <p style="color:#666; font-size:14px; margin:0;">Terlalu banyak permintaan verifikasi dari jaringan Anda dalam waktu singkat. Demi perlindungan sistem, silakan tunggu 1 menit sebelum mencoba kembali.</p>
+                </div>'
+            ), 429 );
+        }
+        set_transient( $rate_key, $attempts + 1, 60 );
+
+        // 3. Sanitasi & Normalisasi Input
+        $raw_input = isset( $_POST['kode_blanko'] ) ? wp_unslash( $_POST['kode_blanko'] ) : '';
+        // Bersihkan karakter kontrol dan spasi tak kasat mata
+        $cleaned   = preg_replace( '/[\x00-\x1F\x7F\xC2\xA0]/u', ' ', (string) $raw_input );
+        $cleaned   = sanitize_text_field( $cleaned );
+        $kode_cert = trim( preg_replace( '/\s+/', ' ', $cleaned ) );
+
+        // Validasi input kosong
+        if ( '' === $kode_cert ) {
+            wp_send_json_error( array(
+                'html' => '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">
+                    Nomor atau kode blanko sertifikat tidak boleh kosong.
+                </div>'
+            ), 400 );
+        }
+
+        // Validasi panjang input
+        $len = mb_strlen( $kode_cert, 'UTF-8' );
+        if ( $len < 3 ) {
+            wp_send_json_error( array(
+                'html' => '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">
+                    Nomor sertifikat terlalu pendek (minimal 3 karakter). Masukkan nomor blanko atau nomor registrasi lengkap.
+                </div>'
+            ), 400 );
+        }
+        if ( $len > 60 ) {
+            wp_send_json_error( array(
+                'html' => '<div class="cert-result-card" style="padding:20px; text-align:center; color:#cf1322;">
+                    Nomor sertifikat melebihi batas panjang maksimum yang diizinkan (maksimal 60 karakter).
+                </div>'
+            ), 400 );
+        }
+
+        // 4. Exact Matching Query (TIDAK MENGGUNAKAN LIKE)
         $query = new WP_Query( array(
-            'post_type'      => 'data_sertifikat',
-            'post_status'    => 'publish',
-            'posts_per_page' => 1,
-            'meta_query'     => array(
+            'post_type'              => 'data_sertifikat',
+            'post_status'            => 'publish',
+            'posts_per_page'         => 2, // Ambil 2 untuk mendeteksi ambiguitas data duplikat
+            'no_found_rows'          => true,
+            'update_post_meta_cache' => true,
+            'update_post_term_cache' => false,
+            'meta_query'             => array(
                 'relation' => 'OR',
-                array( 'key' => 'kode_blanko', 'value' => $kode_blanko, 'compare' => '=' ),
-                array( 'key' => 'no_registrasi', 'value' => $kode_blanko, 'compare' => '=' ),
+                array(
+                    'key'     => 'kode_blanko',
+                    'value'   => $kode_cert,
+                    'compare' => '=',
+                ),
+                array(
+                    'key'     => 'no_registrasi',
+                    'value'   => $kode_cert,
+                    'compare' => '=',
+                ),
             ),
         ) );
 
-        if ( ! $query->have_posts() ) {
-            $query = new WP_Query( array(
-                'post_type'      => 'data_sertifikat',
-                'post_status'    => 'publish',
-                'posts_per_page' => 1,
-                'meta_query'     => array(
-                    'relation' => 'OR',
-                    array( 'key' => 'kode_blanko', 'value' => $kode_blanko, 'compare' => 'LIKE' ),
-                    array( 'key' => 'no_registrasi', 'value' => $kode_blanko, 'compare' => 'LIKE' ),
-                ),
-            ) );
-        }
-
         ob_start();
-        if ( $query->have_posts() ) {
-            $query->the_post();
-            $post_id        = get_the_ID();
+
+        // 5. Penanganan Hasil: Ambiguitas Duplikat vs Tepat Satu vs Tidak Ditemukan
+        if ( $query->post_count > 1 ) {
+            // Data duplikat ditemukan: Jangan memilih salah satu secara sembarangan
+            ?>
+            <div class="cert-result-card">
+                <div class="cert-result-badge-bar" style="background:#d97706; color:#fff;">
+                    <span><i class="fas fa-exclamation-triangle me-2"></i> STATUS: PERLU KLARIFIKASI SEKRETARIAT</span>
+                    <span style="font-size:13px; font-weight:600; opacity:0.9;">No. Input: <?php echo esc_html( $kode_cert ); ?></span>
+                </div>
+                <div class="cert-result-body" style="text-align:center; padding:35px 20px;">
+                    <div style="font-size:45px; color:#d97706; margin-bottom:15px;"><i class="fas fa-copy"></i></div>
+                    <h3 style="color:#b45309; margin-bottom:10px;">Ditemukan Lebih dari Satu Catatan</h3>
+                    <p style="color:#666; max-width:550px; margin:0 auto 15px; font-size:14px; line-height:1.7;">
+                        Nomor identitas ini tercatat pada lebih dari satu berkas sertifikat di pangkalan data. Demi kepastian hukum dan menghindari kesalahan identifikasi, silakan hubungi <strong>Sekretariat LSP Komunikasi Indonesia</strong> untuk verifikasi dokumen fisik secara langsung.
+                    </p>
+                </div>
+            </div>
+            <?php
+        } elseif ( 1 === $query->post_count ) {
+            $post_obj       = $query->posts[0];
+            $post_id        = $post_obj->ID;
+            $db_blanko      = get_post_meta( $post_id, 'kode_blanko', true );
+            if ( empty( $db_blanko ) ) {
+                $db_blanko = get_the_title( $post_id );
+            }
             $nama_pemegang  = get_post_meta( $post_id, 'nama_pemegang', true );
             $skema          = get_post_meta( $post_id, 'skema_sertifikasi', true );
             $no_reg         = get_post_meta( $post_id, 'no_registrasi', true );
             $tanggal_terbit = get_post_meta( $post_id, 'tanggal_terbit', true );
 
-            $time_terbit  = strtotime( $tanggal_terbit );
-            $time_expired = strtotime( '+3 years', $time_terbit );
-            $is_expired   = time() > $time_expired;
+            // Perhitungan masa berlaku yang aman terhadap tanggal tidak valid
+            $time_terbit    = ! empty( $tanggal_terbit ) ? strtotime( $tanggal_terbit ) : false;
+            $has_valid_date = ( false !== $time_terbit && $time_terbit > 0 );
+            $time_expired   = $has_valid_date ? strtotime( '+3 years', $time_terbit ) : 0;
+            $is_expired     = $has_valid_date ? ( time() > $time_expired ) : false;
 
-            $badge_class = $is_expired ? 'badge-expired' : 'badge-valid';
-            $badge_icon  = $is_expired ? 'fa-exclamation-triangle' : 'fa-check-circle';
-            $badge_text  = $is_expired ? 'KADALUARSA (EXPIRED)' : 'VALID &amp; AKTIF';
+            $badge_class = ( ! $has_valid_date ) ? 'badge-expired' : ( $is_expired ? 'badge-expired' : 'badge-valid' );
+            $badge_icon  = ( ! $has_valid_date ) ? 'fa-info-circle' : ( $is_expired ? 'fa-exclamation-triangle' : 'fa-check-circle' );
+            $badge_text  = ( ! $has_valid_date ) ? 'TANGGAL BELUM TERDATA' : ( $is_expired ? 'KADALUARSA (EXPIRED)' : 'VALID &amp; AKTIF' );
             ?>
             <div class="cert-result-card">
                 <div class="cert-result-badge-bar <?php echo esc_attr( $badge_class ); ?>">
                     <span><i class="fas <?php echo esc_attr( $badge_icon ); ?> me-2"></i> STATUS: <?php echo $badge_text; ?></span>
-                    <span style="font-size:13px; font-weight:600; opacity:0.9;">No. Blanko: <?php echo esc_html( $kode_blanko ); ?></span>
+                    <span style="font-size:13px; font-weight:600; opacity:0.9;">No. Blanko: <?php echo esc_html( $db_blanko ); ?></span>
                 </div>
                 <div class="cert-result-body">
-                    <?php if ( $is_expired ) : ?>
+                    <?php if ( ! $has_valid_date ) : ?>
+                        <div style="background:#fffbe6; border:1px solid #ffe58f; padding:12px 16px; border-radius:6px; color:#d46b08; font-size:13.5px; margin-bottom:15px; line-height:1.6;">
+                            <strong>Keterangan:</strong> Sertifikat ini terdaftar resmi dalam pangkalan data LSP, namun informasi tanggal terbit belum lengkap. Silakan hubungi Sekretariat LSP untuk konfirmasi masa berlaku.
+                        </div>
+                    <?php elseif ( $is_expired ) : ?>
                         <div style="background:#fffbe6; border:1px solid #ffe58f; padding:12px 16px; border-radius:6px; color:#d46b08; font-size:13.5px; margin-bottom:15px; line-height:1.6;">
                             <strong>Perhatian:</strong> Sertifikat ini terdaftar resmi dalam pangkalan data LSP, namun <strong>masa berlakunya telah habis</strong> (melebihi batas 3 tahun masa berlaku sertifikasi BNSP).
                         </div>
@@ -2720,32 +2815,36 @@ class LSP_Core_Management {
                     <table class="cert-data-table">
                         <tr>
                             <td class="cert-data-label"><i class="fas fa-barcode me-2" style="color:var(--secondary-color, #f89b29);"></i> Nomor / Kode Blanko</td>
-                            <td class="cert-data-value"><code><?php echo esc_html( $kode_blanko ); ?></code></td>
+                            <td class="cert-data-value"><code><?php echo esc_html( $db_blanko ); ?></code></td>
                         </tr>
                         <tr>
                             <td class="cert-data-label"><i class="fas fa-user-check me-2" style="color:var(--secondary-color, #f89b29);"></i> Nama Pemegang (Asesi)</td>
-                            <td class="cert-data-value" style="font-size:16px; color:var(--primary-color, #72161a);"><?php echo esc_html( $nama_pemegang ); ?></td>
+                            <td class="cert-data-value" style="font-size:16px; color:var(--primary-color, #72161a);"><?php echo esc_html( $nama_pemegang ?: '—' ); ?></td>
                         </tr>
                         <tr>
                             <td class="cert-data-label"><i class="fas fa-id-card me-2" style="color:var(--secondary-color, #f89b29);"></i> Nomor Registrasi</td>
-                            <td class="cert-data-value"><code><?php echo esc_html( $no_reg ); ?></code></td>
+                            <td class="cert-data-value"><code><?php echo esc_html( $no_reg ?: '—' ); ?></code></td>
                         </tr>
                         <tr>
                             <td class="cert-data-label"><i class="fas fa-award me-2" style="color:var(--secondary-color, #f89b29);"></i> Skema Sertifikasi</td>
-                            <td class="cert-data-value"><?php echo esc_html( $skema ); ?></td>
+                            <td class="cert-data-value"><?php echo esc_html( $skema ?: '—' ); ?></td>
                         </tr>
                         <tr>
                             <td class="cert-data-label"><i class="fas fa-calendar-alt me-2" style="color:var(--secondary-color, #f89b29);"></i> Tanggal Terbit</td>
-                            <td class="cert-data-value"><?php echo esc_html( $this->format_indo_date( $time_terbit ) ); ?></td>
+                            <td class="cert-data-value"><?php echo $has_valid_date ? esc_html( $this->format_indo_date( $time_terbit ) ) : '—'; ?></td>
                         </tr>
                         <tr>
                             <td class="cert-data-label"><i class="fas fa-calendar-check me-2" style="color:var(--secondary-color, #f89b29);"></i> Masa Berlaku (3 Tahun)</td>
                             <td class="cert-data-value">
-                                <?php echo esc_html( $this->format_indo_date( $time_expired ) ); ?>
-                                <?php if ( ! $is_expired ) : ?>
-                                    <span style="font-size:12px; color:#16a34a; margin-left:8px; font-weight:600;">(Masih Berlaku)</span>
+                                <?php if ( $has_valid_date ) : ?>
+                                    <?php echo esc_html( $this->format_indo_date( $time_expired ) ); ?>
+                                    <?php if ( ! $is_expired ) : ?>
+                                        <span style="font-size:12px; color:#16a34a; margin-left:8px; font-weight:600;">(Masih Berlaku)</span>
+                                    <?php else : ?>
+                                        <span style="font-size:12px; color:#dc2626; margin-left:8px; font-weight:600;">(Telah Berakhir)</span>
+                                    <?php endif; ?>
                                 <?php else : ?>
-                                    <span style="font-size:12px; color:#dc2626; margin-left:8px; font-weight:600;">(Telah Berakhir)</span>
+                                    <span>—</span>
                                 <?php endif; ?>
                             </td>
                         </tr>
@@ -2761,24 +2860,24 @@ class LSP_Core_Management {
                 </div>
             </div>
             <?php
-            wp_reset_postdata();
         } else {
             ?>
             <div class="cert-result-card">
                 <div class="cert-result-badge-bar badge-notfound">
                     <span><i class="fas fa-times-circle me-2"></i> STATUS: TIDAK DITEMUKAN / TIDAK VALID</span>
-                    <span style="font-size:13px; font-weight:600; opacity:0.9;">No. Blanko: <?php echo esc_html( $kode_blanko ); ?></span>
+                    <span style="font-size:13px; font-weight:600; opacity:0.9;">Pencarian: <?php echo esc_html( $kode_cert ); ?></span>
                 </div>
                 <div class="cert-result-body" style="text-align:center; padding:35px 20px;">
                     <div style="font-size:45px; color:#dc2626; margin-bottom:15px;"><i class="fas fa-file-excel"></i></div>
-                    <h3 style="color:#b91c1c; margin-bottom:10px;">Nomor Blanko Tidak Terdaftar!</h3>
+                    <h3 style="color:#b91c1c; margin-bottom:10px;">Nomor Sertifikat Tidak Terdaftar!</h3>
                     <p style="color:#666; max-width:550px; margin:0 auto 15px; font-size:14px; line-height:1.7;">
-                        Nomor blanko sertifikat <strong>"<?php echo esc_html( $kode_blanko ); ?>"</strong> tidak tercatat dalam pangkalan data resmi kami.
+                        Nomor blanko atau nomor registrasi <strong>"<?php echo esc_html( $kode_cert ); ?>"</strong> tidak tercatat dalam pangkalan data resmi kami. Pastikan nomor yang Anda masukkan sesuai persis dengan yang tertera pada sertifikat fisik BNSP Anda.
                     </p>
                 </div>
             </div>
             <?php
         }
+
         $output = ob_get_clean();
         wp_send_json_success( array( 'html' => $output ) );
     }

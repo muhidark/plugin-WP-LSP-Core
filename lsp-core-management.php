@@ -31,6 +31,48 @@ class LSP_Core_Management {
         return self::$instance;
     }
 
+    /**
+     * Mengambil data unit kompetensi lengkap beserta Elemen & KUK dari SKKNI
+     *
+     * @param int $post_id ID Skema
+     * @return array
+     */
+    public static function get_skema_skkni_data( $post_id ) {
+        $skkni_data = get_post_meta( $post_id, 'skkni_data', true );
+        if ( ! empty( $skkni_data ) && is_array( $skkni_data ) ) {
+            return $skkni_data;
+        }
+
+        // Fallback: parse unit_kompetensi (KODE | JUDUL)
+        $unit_text = get_post_meta( $post_id, 'unit_kompetensi', true );
+        if ( empty( $unit_text ) ) {
+            return array();
+        }
+
+        $units = array();
+        $lines = explode( "\n", str_replace( "\r", "", $unit_text ) );
+        foreach ( $lines as $line ) {
+            $line = trim( $line );
+            if ( empty( $line ) ) continue;
+            $parts = explode( '|', $line );
+            if ( count( $parts ) >= 2 ) {
+                $units[] = array(
+                    'kode_unit'  => trim( $parts[0] ),
+                    'judul_unit' => trim( $parts[1] ),
+                    'elemen'     => array(
+                        array(
+                            'nomor' => 1,
+                            'nama'  => 'Melaksanakan unit kompetensi ' . trim( $parts[1] ),
+                            'kuk'   => array( '1.1 Menerapkan prosedur kerja sesuai standar yang berlaku.' ),
+                        ),
+                    ),
+                );
+            }
+        }
+
+        return $units;
+    }
+
     public function __construct() {
         // 1. Register Custom Post Types (Skema, TUK, Data Sertifikat) & Custom User Role (Asesor)
         add_action( 'init', array( $this, 'register_cpts_and_roles' ) );
@@ -293,7 +335,15 @@ class LSP_Core_Management {
         $biaya           = get_post_meta( $post->ID, 'biaya_sertifikasi', true );
         $persyaratan     = get_post_meta( $post->ID, 'persyaratan_skema', true );
         $persyaratan_adm = get_post_meta( $post->ID, 'persyaratan_admin', true );
+        $acuan_skkni     = get_post_meta( $post->ID, 'acuan_skkni', true );
         $unit_kompetensi = get_post_meta( $post->ID, 'unit_kompetensi', true );
+        $skkni_data_raw  = get_post_meta( $post->ID, 'skkni_data', true );
+        $skkni_data_json = '';
+        if ( is_array( $skkni_data_raw ) ) {
+            $skkni_data_json = wp_json_encode( $skkni_data_raw, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE );
+        } elseif ( is_string( $skkni_data_raw ) && ! empty( $skkni_data_raw ) ) {
+            $skkni_data_json = $skkni_data_raw;
+        }
         ?>
         <style>
             .lsp-meta-row { margin-bottom: 20px; }
@@ -350,9 +400,36 @@ class LSP_Core_Management {
         </div>
 
         <div class="lsp-meta-row">
+            <label for="acuan_skkni">Acuan Normatif Standar Kompetensi (SKKNI)</label>
+            <textarea id="acuan_skkni" name="acuan_skkni" rows="3" placeholder="Contoh: Keputusan Menteri Ketenagakerjaan RI Nomor 124 Tahun 2022 tentang Penetapan SKKNI Bidang Pemasaran..."><?php echo esc_textarea( $acuan_skkni ); ?></textarea>
+            <p class="description">Tuliskan nomor Kepmenaker atau dasar hukum SKKNI rujukan skema ini.</p>
+        </div>
+
+        <div class="lsp-meta-row">
             <label for="unit_kompetensi">Daftar Unit Kompetensi</label>
             <textarea id="unit_kompetensi" name="unit_kompetensi" rows="8" placeholder="J.620100.001.01 | Mengumpulkan Kebutuhan Teknis&#10;J.620100.002.01 | Mendesain Jaringan..."><?php echo esc_textarea( $unit_kompetensi ); ?></textarea>
             <p class="description"><strong>Format Wajib:</strong> Kode Unit [spasi] | [spasi] Judul Unit. <br>Gunakan garis lurus (|) sebagai pemisah. Satu baris untuk satu unit.</p>
+        </div>
+
+        <div class="lsp-meta-row">
+            <label for="skkni_data">Struktur Rujukan SKKNI (Elemen Kompetensi & KUK)</label>
+            <textarea id="skkni_data" name="skkni_data" rows="12" style="font-family: monospace; font-size: 13px;" placeholder='[
+  {
+    "kode_unit": "M.70MKT00.009.2",
+    "judul_unit": "Merencanakan Riset Terhadap Sebuah Produk dan/atau Merek",
+    "elemen": [
+      {
+        "nomor": 1,
+        "nama": "Menentukan kebutuhan dan tujuan riset",
+        "kuk": [
+          "1.1 Masalah diidentifikasi berdasarkan ketidaksesuaian terhadap strategi organisasi.",
+          "1.2 Tujuan riset ditentukan sesuai dengan identifikasi masalah."
+        ]
+      }
+    ]
+  }
+]'><?php echo esc_textarea( $skkni_data_json ); ?></textarea>
+            <p class="description">Data rujukan SKKNI lengkap (JSON format) untuk otomatisasi pengisian formulir FR.APL.02 dan dokumen asesmen BNSP. Jika diisi, daftar unit kompetensi di atas akan otomatis sinkron.</p>
         </div>
         <?php
     }
@@ -383,7 +460,34 @@ class LSP_Core_Management {
         if ( isset( $_POST['persyaratan_admin'] ) ) {
             update_post_meta( $post_id, 'persyaratan_admin', wp_kses_post( $_POST['persyaratan_admin'] ) );
         }
-        if ( isset( $_POST['unit_kompetensi'] ) ) {
+        if ( isset( $_POST['acuan_skkni'] ) ) {
+            update_post_meta( $post_id, 'acuan_skkni', wp_kses_post( $_POST['acuan_skkni'] ) );
+        }
+        if ( isset( $_POST['skkni_data'] ) ) {
+            $raw_json = wp_unslash( $_POST['skkni_data'] );
+            $decoded  = json_decode( $raw_json, true );
+            if ( json_last_error() === JSON_ERROR_NONE && is_array( $decoded ) ) {
+                update_post_meta( $post_id, 'skkni_data', $decoded );
+
+                // Otomatis sinkronkan unit_kompetensi teks jika belum diisi manual
+                if ( empty( trim( $_POST['unit_kompetensi'] ?? '' ) ) ) {
+                    $unit_lines = array();
+                    foreach ( $decoded as $u ) {
+                        $k = trim( $u['kode_unit'] ?? '' );
+                        $j = trim( $u['judul_unit'] ?? '' );
+                        if ( $k && $j ) {
+                            $unit_lines[] = "$k | $j";
+                        }
+                    }
+                    if ( ! empty( $unit_lines ) ) {
+                        update_post_meta( $post_id, 'unit_kompetensi', implode( "\n", $unit_lines ) );
+                    }
+                }
+            } elseif ( empty( trim( $raw_json ) ) ) {
+                delete_post_meta( $post_id, 'skkni_data' );
+            }
+        }
+        if ( isset( $_POST['unit_kompetensi'] ) && ! empty( trim( $_POST['unit_kompetensi'] ) ) ) {
             update_post_meta( $post_id, 'unit_kompetensi', wp_kses_post( $_POST['unit_kompetensi'] ) );
         }
 
@@ -4368,7 +4472,9 @@ class LSP_Core_Management {
         $biaya         = get_post_meta( $post_id, 'biaya_sertifikasi', true );
         $syarat        = get_post_meta( $post_id, 'persyaratan_skema', true );
         $syarat_admin  = get_post_meta( $post_id, 'persyaratan_admin', true );
+        $acuan         = get_post_meta( $post_id, 'acuan_skkni', true );
         $unit          = get_post_meta( $post_id, 'unit_kompetensi', true );
+        $skkni_units   = self::get_skema_skkni_data( $post_id );
 
         $wa_number = get_option( 'lsp_core_wa_number', '6281328430600' );
         $reg_url   = get_option( 'lsp_core_register_url', '#' );
@@ -4417,6 +4523,14 @@ class LSP_Core_Management {
             echo '<h3 style="margin-top: 30px; border-bottom: 2px solid #eee; padding-bottom: 10px;">2. Persyaratan Administrasi</h3>';
             echo '<div style="background: #fff5f2; padding: 20px; border-radius: 4px; border: 1px solid #f25a2b; margin-top: 15px; line-height: 1.8;">';
             echo nl2br( esc_html( $syarat_admin ) );
+            echo '</div>';
+        }
+
+        // 2c. Acuan Standar Kompetensi (SKKNI)
+        if ( $acuan ) {
+            echo '<h3 style="margin-top: 30px; border-bottom: 2px solid #eee; padding-bottom: 10px;">3. Acuan Standar Kompetensi Kerja (SKKNI)</h3>';
+            echo '<div style="background: #f8fafc; padding: 20px; border-radius: 4px; border: 1px solid #cbd5e1; margin-top: 15px; line-height: 1.8;">';
+            echo nl2br( esc_html( $acuan ) );
             echo '</div>';
         }
 

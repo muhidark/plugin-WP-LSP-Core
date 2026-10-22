@@ -18,6 +18,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 if ( ! class_exists( 'LSP_Core_Management' ) ) :
 
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-skema.php';
+
 class LSP_Core_Management {
 
     const ASESOR_ROLE_VERSION = '1.1.0';
@@ -38,39 +40,7 @@ class LSP_Core_Management {
      * @return array
      */
     public static function get_skema_skkni_data( $post_id ) {
-        $skkni_data = get_post_meta( $post_id, 'skkni_data', true );
-        if ( ! empty( $skkni_data ) && is_array( $skkni_data ) ) {
-            return $skkni_data;
-        }
-
-        // Fallback: parse unit_kompetensi (KODE | JUDUL)
-        $unit_text = get_post_meta( $post_id, 'unit_kompetensi', true );
-        if ( empty( $unit_text ) ) {
-            return array();
-        }
-
-        $units = array();
-        $lines = explode( "\n", str_replace( "\r", "", $unit_text ) );
-        foreach ( $lines as $line ) {
-            $line = trim( $line );
-            if ( empty( $line ) ) continue;
-            $parts = explode( '|', $line );
-            if ( count( $parts ) >= 2 ) {
-                $units[] = array(
-                    'kode_unit'  => trim( $parts[0] ),
-                    'judul_unit' => trim( $parts[1] ),
-                    'elemen'     => array(
-                        array(
-                            'nomor' => 1,
-                            'nama'  => 'Melaksanakan unit kompetensi ' . trim( $parts[1] ),
-                            'kuk'   => array( '1.1 Menerapkan prosedur kerja sesuai standar yang berlaku.' ),
-                        ),
-                    ),
-                );
-            }
-        }
-
-        return $units;
+        return LSP_Core_Skema::get_skema_skkni_data( $post_id );
     }
 
     public function __construct() {
@@ -321,178 +291,14 @@ class LSP_Core_Management {
     }
 
     /**
-     * 2A. Render & Save Meta Box Skema
+     * 2A. Render & Save Meta Box Skema (Facade to LSP_Core_Skema)
      */
     public function render_skema_meta_box( $post ) {
-        wp_nonce_field( 'lsp_skema_save_meta', 'lsp_skema_meta_nonce' );
-
-        $kode_skema      = get_post_meta( $post->ID, 'kode_skema', true );
-        $level_skema     = get_post_meta( $post->ID, 'level_skema', true );
-        if ( '' === $level_skema ) {
-            $level_skema = get_post_meta( $post->ID, 'level', true );
-        }
-        $jenis_kemasan   = get_post_meta( $post->ID, 'jenis_kemasan', true );
-        $biaya           = get_post_meta( $post->ID, 'biaya_sertifikasi', true );
-        $persyaratan     = get_post_meta( $post->ID, 'persyaratan_skema', true );
-        $persyaratan_adm = get_post_meta( $post->ID, 'persyaratan_admin', true );
-        $acuan_skkni     = get_post_meta( $post->ID, 'acuan_skkni', true );
-        $unit_kompetensi = get_post_meta( $post->ID, 'unit_kompetensi', true );
-        $skkni_data_raw  = get_post_meta( $post->ID, 'skkni_data', true );
-        $skkni_data_json = '';
-        if ( is_array( $skkni_data_raw ) ) {
-            $skkni_data_json = wp_json_encode( $skkni_data_raw, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE );
-        } elseif ( is_string( $skkni_data_raw ) && ! empty( $skkni_data_raw ) ) {
-            $skkni_data_json = $skkni_data_raw;
-        }
-        ?>
-        <style>
-            .lsp-meta-row { margin-bottom: 20px; }
-            .lsp-meta-row label { font-weight: bold; display: block; margin-bottom: 8px; font-size: 14px; }
-            .lsp-meta-row input[type="text"], .lsp-meta-row input[type="number"], .lsp-meta-row select, .lsp-meta-row textarea { width: 100%; max-width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-            .lsp-meta-row p.description { color: #666; font-size: 12px; margin-top: 5px; font-style: italic; }
-        </style>
-
-        <div class="lsp-meta-row">
-            <label for="kode_skema">Kode Skema</label>
-            <input type="text" id="kode_skema" name="kode_skema" value="<?php echo esc_attr( $kode_skema ); ?>" placeholder="Contoh: SS.01.001.2023" />
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="level_skema">Level Skema Sertifikasi (Angka 1 - 9)</label>
-            <input type="number" id="level_skema" name="level_skema" min="1" max="9" step="1" value="<?php echo esc_attr( $level_skema ); ?>" placeholder="Contoh: 3" style="width: 100%; max-width: 220px;" />
-            <p class="description">Masukkan nilai level skema (angka 1 s/d 9). Pada kartu skema akan tertulis: <strong>Level <?php echo $level_skema ? esc_html( $level_skema ) : '...'; ?></strong></p>
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="jenis_kemasan">Jenis Kemasan</label>
-            <select id="jenis_kemasan" name="jenis_kemasan">
-                <option value="">-- Pilih Jenis Kemasan --</option>
-                <?php
-                $options_kemasan = array(
-                    'KKNI'    => 'KKNI',
-                    'Okupasi' => 'Okupasi',
-                    'Klaster' => 'Klaster',
-                );
-                foreach ( $options_kemasan as $val => $lbl ) {
-                    echo '<option value="' . esc_attr( $val ) . '" ' . selected( $jenis_kemasan, $val, false ) . '>' . esc_html( $lbl ) . '</option>';
-                }
-                ?>
-            </select>
-            <p class="description">Pilih jenis kemasan: KKNI, Okupasi, atau Klaster.</p>
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="biaya_sertifikasi">Biaya Sertifikasi (Rp)</label>
-            <input type="text" id="biaya_sertifikasi" name="biaya_sertifikasi" value="<?php echo esc_attr( $biaya ); ?>" placeholder="Contoh: 1500000" />
-            <p class="description">Tulis angkanya saja, tanpa titik atau koma.</p>
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="persyaratan_skema">1. Persyaratan Dasar</label>
-            <textarea id="persyaratan_skema" name="persyaratan_skema" rows="4" placeholder="Contoh: Pendidikan minimal SMA..."><?php echo esc_textarea( $persyaratan ); ?></textarea>
-            <p class="description">Gunakan baris baru (Enter) untuk memisahkan setiap poin persyaratan.</p>
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="persyaratan_admin">2. Persyaratan Administrasi</label>
-            <textarea id="persyaratan_admin" name="persyaratan_admin" rows="4" placeholder="Contoh: Fotocopy KTP, Pas Foto 3x4..."><?php echo esc_textarea( $persyaratan_adm ); ?></textarea>
-            <p class="description">Gunakan baris baru (Enter) untuk memisahkan setiap poin persyaratan administrasi.</p>
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="acuan_skkni">Acuan Normatif Standar Kompetensi (SKKNI)</label>
-            <textarea id="acuan_skkni" name="acuan_skkni" rows="3" placeholder="Contoh: Keputusan Menteri Ketenagakerjaan RI Nomor 124 Tahun 2022 tentang Penetapan SKKNI Bidang Pemasaran..."><?php echo esc_textarea( $acuan_skkni ); ?></textarea>
-            <p class="description">Tuliskan nomor Kepmenaker atau dasar hukum SKKNI rujukan skema ini.</p>
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="unit_kompetensi">Daftar Unit Kompetensi</label>
-            <textarea id="unit_kompetensi" name="unit_kompetensi" rows="8" placeholder="J.620100.001.01 | Mengumpulkan Kebutuhan Teknis&#10;J.620100.002.01 | Mendesain Jaringan..."><?php echo esc_textarea( $unit_kompetensi ); ?></textarea>
-            <p class="description"><strong>Format Wajib:</strong> Kode Unit [spasi] | [spasi] Judul Unit. <br>Gunakan garis lurus (|) sebagai pemisah. Satu baris untuk satu unit.</p>
-        </div>
-
-        <div class="lsp-meta-row">
-            <label for="skkni_data">Struktur Rujukan SKKNI (Elemen Kompetensi & KUK)</label>
-            <textarea id="skkni_data" name="skkni_data" rows="12" style="font-family: monospace; font-size: 13px;" placeholder='[
-  {
-    "kode_unit": "M.70MKT00.009.2",
-    "judul_unit": "Merencanakan Riset Terhadap Sebuah Produk dan/atau Merek",
-    "elemen": [
-      {
-        "nomor": 1,
-        "nama": "Menentukan kebutuhan dan tujuan riset",
-        "kuk": [
-          "1.1 Masalah diidentifikasi berdasarkan ketidaksesuaian terhadap strategi organisasi.",
-          "1.2 Tujuan riset ditentukan sesuai dengan identifikasi masalah."
-        ]
-      }
-    ]
-  }
-]'><?php echo esc_textarea( $skkni_data_json ); ?></textarea>
-            <p class="description">Data rujukan SKKNI lengkap (JSON format) untuk otomatisasi pengisian formulir FR.APL.02 dan dokumen asesmen BNSP. Jika diisi, daftar unit kompetensi di atas akan otomatis sinkron.</p>
-        </div>
-        <?php
+        return LSP_Core_Skema::get_instance()->render_skema_meta_box( $post );
     }
 
     public function save_skema_meta( $post_id ) {
-        if ( ! isset( $_POST['lsp_skema_meta_nonce'] ) ) return;
-        if ( ! wp_verify_nonce( $_POST['lsp_skema_meta_nonce'], 'lsp_skema_save_meta' ) ) return;
-        if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
-        if ( ! current_user_can( 'edit_post', $post_id ) ) return;
-
-        if ( isset( $_POST['kode_skema'] ) ) {
-            update_post_meta( $post_id, 'kode_skema', sanitize_text_field( $_POST['kode_skema'] ) );
-        }
-        if ( isset( $_POST['level_skema'] ) ) {
-            $lvl = sanitize_text_field( $_POST['level_skema'] );
-            update_post_meta( $post_id, 'level_skema', $lvl );
-            update_post_meta( $post_id, 'level', $lvl );
-        }
-        if ( isset( $_POST['jenis_kemasan'] ) ) {
-            update_post_meta( $post_id, 'jenis_kemasan', sanitize_text_field( $_POST['jenis_kemasan'] ) );
-        }
-        if ( isset( $_POST['biaya_sertifikasi'] ) ) {
-            update_post_meta( $post_id, 'biaya_sertifikasi', sanitize_text_field( $_POST['biaya_sertifikasi'] ) );
-        }
-        if ( isset( $_POST['persyaratan_skema'] ) ) {
-            update_post_meta( $post_id, 'persyaratan_skema', wp_kses_post( $_POST['persyaratan_skema'] ) );
-        }
-        if ( isset( $_POST['persyaratan_admin'] ) ) {
-            update_post_meta( $post_id, 'persyaratan_admin', wp_kses_post( $_POST['persyaratan_admin'] ) );
-        }
-        if ( isset( $_POST['acuan_skkni'] ) ) {
-            update_post_meta( $post_id, 'acuan_skkni', wp_kses_post( $_POST['acuan_skkni'] ) );
-        }
-        if ( isset( $_POST['skkni_data'] ) ) {
-            $raw_json = wp_unslash( $_POST['skkni_data'] );
-            $decoded  = json_decode( $raw_json, true );
-            if ( json_last_error() === JSON_ERROR_NONE && is_array( $decoded ) ) {
-                update_post_meta( $post_id, 'skkni_data', $decoded );
-
-                // Otomatis sinkronkan unit_kompetensi teks jika belum diisi manual
-                if ( empty( trim( $_POST['unit_kompetensi'] ?? '' ) ) ) {
-                    $unit_lines = array();
-                    foreach ( $decoded as $u ) {
-                        $k = trim( $u['kode_unit'] ?? '' );
-                        $j = trim( $u['judul_unit'] ?? '' );
-                        if ( $k && $j ) {
-                            $unit_lines[] = "$k | $j";
-                        }
-                    }
-                    if ( ! empty( $unit_lines ) ) {
-                        update_post_meta( $post_id, 'unit_kompetensi', implode( "\n", $unit_lines ) );
-                    }
-                }
-            } elseif ( empty( trim( $raw_json ) ) ) {
-                delete_post_meta( $post_id, 'skkni_data' );
-            }
-        }
-        if ( isset( $_POST['unit_kompetensi'] ) && ! empty( trim( $_POST['unit_kompetensi'] ) ) ) {
-            update_post_meta( $post_id, 'unit_kompetensi', wp_kses_post( $_POST['unit_kompetensi'] ) );
-        }
-
-        // Otomatis buatkan / perbarui gambar Featured Image (Auto-Cover UI) jika belum ada foto kustom
-        $this->maybe_generate_skema_auto_thumbnail( $post_id );
+        return LSP_Core_Skema::get_instance()->save_skema_meta( $post_id );
     }
 
     /**
@@ -4459,110 +4265,10 @@ class LSP_Core_Management {
     }
 
     /**
-     * Render Konten Detail Single Skema Sertifikasi
+     * Render Konten Detail Single Skema Sertifikasi (Facade to LSP_Core_Skema)
      */
     public function render_single_skema_content( $raw_content = '' ) {
-        $post_id       = get_the_ID();
-        $kode          = get_post_meta( $post_id, 'kode_skema', true );
-        $level         = get_post_meta( $post_id, 'level_skema', true );
-        if ( empty( $level ) ) {
-            $level = get_post_meta( $post_id, 'level', true );
-        }
-        $jenis_kemasan = get_post_meta( $post_id, 'jenis_kemasan', true );
-        $biaya         = get_post_meta( $post_id, 'biaya_sertifikasi', true );
-        $syarat        = get_post_meta( $post_id, 'persyaratan_skema', true );
-        $syarat_admin  = get_post_meta( $post_id, 'persyaratan_admin', true );
-        $acuan         = get_post_meta( $post_id, 'acuan_skkni', true );
-        $unit          = get_post_meta( $post_id, 'unit_kompetensi', true );
-        $skkni_units   = self::get_skema_skkni_data( $post_id );
-
-        $wa_number = get_option( 'lsp_core_wa_number', '6281328430600' );
-        $reg_url   = get_option( 'lsp_core_register_url', '#' );
-
-        ob_start();
-
-        // 1. Box Info (Kode, Level, Jenis Kemasan & Biaya)
-        echo '<div style="background: #f0f9ff; padding: 20px; border-left: 4px solid var(--secondary-color, #f89b29); margin-bottom: 20px; border-radius: 4px;">';
-        if ( $kode ) {
-            echo '<div style="margin-bottom: 10px; font-size: 16px;"><strong>Kode Skema:</strong> ' . esc_html( $kode ) . '</div>';
-        }
-        if ( $level ) {
-            echo '<div style="margin-bottom: 10px; font-size: 16px;"><strong>Level:</strong> <span style="display: inline-block; background: #fff8f0; color: #72161a; border: 1px solid #f89b29; padding: 2px 10px; border-radius: 4px; font-weight: 700;">Level ' . esc_html( $level ) . '</span></div>';
-        }
-        if ( $jenis_kemasan ) {
-            echo '<div style="margin-bottom: 10px; font-size: 16px;"><strong>Jenis Kemasan:</strong> <span style="display: inline-block; background: #e0f2fe; color: #0284c7; padding: 3px 12px; border-radius: 4px; font-weight: 700;">' . esc_html( $jenis_kemasan ) . '</span></div>';
-        }
-        if ( $biaya ) {
-            echo '<div><strong style="color: var(--primary-color, #72161a); font-size: 18px;">Biaya Sertifikasi: Rp ' . number_format( (float) $biaya, 0, ',', '.' ) . '</strong></div>';
-        }
-        echo '</div>';
-
-        // 1b. Action Buttons (Daftar & Konsultasi)
-        $judul_skema     = get_the_title( $post_id );
-        $pesan_wa_encode = urlencode( "Halo Admin, saya mau konsultasi untuk sertifikasi '{$judul_skema}'" );
-        $js_trigger      = "event.preventDefault(); var floatingBtn = document.querySelector('#wa-qc-toggle-btn, .wa-qc-toggle-btn, .wa-quick-connect-floating, .wa-floating-button, .wa-chat-button, #wa-widget'); if(floatingBtn) { floatingBtn.click(); var msgBox = document.querySelector('#wa-qc-floating-container textarea[name=\\'wa_message\\']'); if(msgBox && !msgBox.value) { msgBox.value = 'Halo Admin, saya mau konsultasi untuk sertifikasi \\'" . esc_js( $judul_skema ) . "\\''; } } else { window.open('https://wa.me/" . esc_js( $wa_number ) . "?text=" . $pesan_wa_encode . "', '_blank'); }";
-
-        echo '<div style="margin-bottom: 30px; display: flex; gap: 10px; flex-wrap: wrap;">';
-        echo '<a href="' . esc_url( $reg_url ?: '#' ) . '" style="background: #0ea5e9; color: #fff; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block;">📝 Daftar Sekarang</a>';
-        echo '<a href="#" onclick="' . esc_attr( $js_trigger ) . '" style="background: #25D366; color: #fff; padding: 12px 25px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block;">💬 Konsultasi via WA</a>';
-        echo '</div>';
-
-        // Teks utama artikel
-        echo apply_filters( 'the_content', $raw_content );
-
-        // 2a. Persyaratan Dasar
-        if ( $syarat ) {
-            echo '<h3 style="margin-top: 40px; border-bottom: 2px solid #eee; padding-bottom: 10px;">1. Persyaratan Dasar</h3>';
-            echo '<div style="background: #fff5f2; padding: 20px; border-radius: 4px; border: 1px solid #f25a2b; margin-top: 15px; line-height: 1.8;">';
-            echo nl2br( esc_html( $syarat ) );
-            echo '</div>';
-        }
-
-        // 2b. Persyaratan Administrasi
-        if ( $syarat_admin ) {
-            echo '<h3 style="margin-top: 30px; border-bottom: 2px solid #eee; padding-bottom: 10px;">2. Persyaratan Administrasi</h3>';
-            echo '<div style="background: #fff5f2; padding: 20px; border-radius: 4px; border: 1px solid #f25a2b; margin-top: 15px; line-height: 1.8;">';
-            echo nl2br( esc_html( $syarat_admin ) );
-            echo '</div>';
-        }
-
-        // 2c. Acuan Standar Kompetensi (SKKNI)
-        if ( $acuan ) {
-            echo '<h3 style="margin-top: 30px; border-bottom: 2px solid #eee; padding-bottom: 10px;">3. Acuan Standar Kompetensi Kerja (SKKNI)</h3>';
-            echo '<div style="background: #f8fafc; padding: 20px; border-radius: 4px; border: 1px solid #cbd5e1; margin-top: 15px; line-height: 1.8;">';
-            echo nl2br( esc_html( $acuan ) );
-            echo '</div>';
-        }
-
-        // 3. Tabel Unit Kompetensi
-        if ( $unit ) {
-            echo '<h3 style="margin-top: 40px; border-bottom: 2px solid #eee; padding-bottom: 10px;">Daftar Unit Kompetensi</h3>';
-            echo '<div style="overflow-x: auto;">';
-            echo '<table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 15px;">';
-            echo '<thead><tr style="background: #f25a2b; color: #fff;">';
-            echo '<th style="padding: 12px; border: 1px solid #ddd; width: 50px; text-align:center;">No</th>';
-            echo '<th style="padding: 12px; border: 1px solid #ddd; width: 200px;">Kode Unit</th>';
-            echo '<th style="padding: 12px; border: 1px solid #ddd;">Judul Unit</th>';
-            echo '</tr></thead><tbody>';
-
-            $lines = explode( "\n", $unit );
-            $no    = 1;
-            foreach ( $lines as $line ) {
-                if ( '' === trim( $line ) ) continue;
-                $parts      = explode( '|', $line );
-                $kode_unit  = isset( $parts[0] ) ? trim( $parts[0] ) : '';
-                $judul_unit = isset( $parts[1] ) ? trim( $parts[1] ) : '';
-
-                echo '<tr>';
-                echo '<td style="padding: 10px; border: 1px solid #ddd; text-align:center;">' . $no++ . '</td>';
-                echo '<td style="padding: 10px; border: 1px solid #ddd; font-family: monospace;">' . esc_html( $kode_unit ) . '</td>';
-                echo '<td style="padding: 10px; border: 1px solid #ddd;">' . esc_html( $judul_unit ) . '</td>';
-                echo '</tr>';
-            }
-            echo '</tbody></table></div>';
-        }
-
-        return ob_get_clean();
+        return LSP_Core_Skema::get_instance()->render_single_skema_content( $raw_content );
     }
 
     /**

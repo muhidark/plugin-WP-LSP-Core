@@ -95,9 +95,9 @@ run_pkg_test( 'TEST 02: Struktur direktori dan inventarisasi berkas runtime leng
     return true;
 } );
 
-run_pkg_test( 'TEST 03: Header plugin di dalam ZIP memuat versi 1.1.0-RC1 dan persyaratan minimum', function() use ( $extract_dir ) {
+run_pkg_test( 'TEST 03: Header plugin di dalam ZIP memuat versi 1.1.1 dan persyaratan minimum', function() use ( $extract_dir ) {
     $content = file_get_contents( "{$extract_dir}/lsp-core-management/lsp-core-management.php" );
-    $has_ver  = ( false !== strpos( $content, 'Version:     1.1.0-RC1' ) );
+    $has_ver  = ( false !== strpos( $content, 'Version:     1.1.1' ) );
     $has_php  = ( false !== strpos( $content, 'Requires PHP: 7.4' ) );
     $has_wp   = ( false !== strpos( $content, 'Requires at least: 5.8' ) );
 
@@ -149,8 +149,9 @@ run_pkg_test( 'TEST 06: Slug rewrite CPT skema dan tuk tetap stabil dan konsiste
 // =========================================================================
 $backup_sql = '/tmp/staging_drill_backup.sql';
 run_pkg_test( 'TEST 07: Simulasi Pencadangan Database Penuh (Database Dump Drill)', function() use ( $backup_sql, $wpdb ) {
-    // Eksekusi mysqldump via socket
-    $cmd = "mysqldump --no-defaults --socket=/tmp/mysql.sock -u root -p1 wordpress_db > {$backup_sql} 2>&1";
+    // Eksekusi mysqldump (auto-detect socket jika ada)
+    $socket_arg = file_exists( '/tmp/mysql.sock' ) ? '--socket=/tmp/mysql.sock' : '';
+    $cmd = "mysqldump -u root -p1 {$socket_arg} wordpress_db > {$backup_sql} 2>&1";
     exec( $cmd, $output, $ret );
 
     return ( 0 === $ret && file_exists( $backup_sql ) && filesize( $backup_sql ) > 1000 );

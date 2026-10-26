@@ -1120,7 +1120,11 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
                     echo '<div style="font-size:13px; color:#64748b; margin-top:4px;">' . esc_html( $deskripsi_unit ) . '</div>';
                 }
                 echo '</td>';
-                echo '<td style="padding: 12px; border: 1px solid #ddd; text-align:center;"><span style="background:#f1f5f9; padding:4px 10px; border-radius:12px; font-size:13px; font-weight:600;">' . $elem_count . ' Elemen</span></td>';
+                // Badge elemen: tampilkan "—" bila data elemen belum tersedia, agar halaman
+                // publik tidak terlihat rusak saat Master Skema belum dilengkapi.
+                $elem_label = $elem_count > 0 ? $elem_count . ' Elemen' : '—';
+                $elem_title = $elem_count > 0 ? $elem_count . ' elemen kompetensi' : 'Data elemen belum tersedia';
+                echo '<td style="padding: 12px; border: 1px solid #ddd; text-align:center;"><span title="' . esc_attr( $elem_title ) . '" style="background:#f1f5f9; padding:4px 10px; border-radius:12px; font-size:13px; font-weight:600;">' . esc_html( $elem_label ) . '</span></td>';
                 echo '</tr>';
             }
             echo '</tbody></table></div>';

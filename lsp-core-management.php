@@ -1977,6 +1977,16 @@ class LSP_Core_Management {
             array( $this, 'render_asesor_admin_page' )
         );
 
+        // Submenu Kelayakan & Migrasi Data SKKNI
+        add_submenu_page(
+            'edit.php?post_type=skema',
+            __( 'Kelayakan & Migrasi Data SKKNI', 'lsp-core-management' ),
+            __( 'Migrasi SKKNI', 'lsp-core-management' ),
+            'manage_options',
+            'lsp-skkni-migration',
+            array( $this, 'render_skkni_migration_page' )
+        );
+
         // Daftarkan halaman Pengaturan & Panduan (diakses via Tab Skema Sertifikasi)
         add_submenu_page(
             'edit.php?post_type=skema',
@@ -2047,6 +2057,14 @@ class LSP_Core_Management {
                 'edit_posts',
                 'edit.php?post_type=tuk',
                 __( 'TUK', 'lsp-core-management' ),
+            );
+
+            // 4. Migrasi SKKNI
+            $clean_sub[] = array(
+                __( 'Migrasi SKKNI', 'lsp-core-management' ),
+                'manage_options',
+                'lsp-skkni-migration',
+                __( 'Migrasi SKKNI', 'lsp-core-management' ),
             );
 
             $submenu['edit.php?post_type=skema'] = $clean_sub;
@@ -4686,6 +4704,439 @@ class LSP_Core_Management {
         }
 
         flush_rewrite_rules();
+    }
+
+    /**
+     * ====================================================================
+     * 7. TOOLS: KELAYAKAN & MIGRASI DATA SKKNI
+     * ====================================================================
+     */
+
+    /**
+     * Ringkasan status kelengkapan Elemen/KUK per skema.
+     *
+     * @return array[]
+     */
+    public function collect_skkni_status_rows() {
+        global $wpdb;
+
+        $kegiatan_table = $wpdb->prefix . 'lsp_kegiatan';
+        $has_kegiatan   = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $kegiatan_table ) ) === $kegiatan_table );
+
+        $posts = get_posts( array(
+            'post_type'      => 'skema',
+            'posts_per_page' => -1,
+            'post_status'    => array( 'publish', 'draft', 'pending', 'private' ),
+            'orderby'        => 'title',
+            'order'          => 'ASC',
+        ) );
+
+        $rows = array();
+        foreach ( $posts as $post ) {
+            $units       = self::get_skema_skkni_data( $post->ID );
+            $n_unit      = count( $units );
+            $n_elemen    = 0;
+            $n_kuk       = 0;
+            $n_tanpa     = 0;
+
+            foreach ( $units as $u ) {
+                $elemen = isset( $u['elemen'] ) && is_array( $u['elemen'] ) ? $u['elemen'] : array();
+                $kuk_u  = 0;
+                foreach ( $elemen as $e ) {
+                    $n_elemen++;
+                    if ( ! empty( $e['kuk'] ) ) {
+                        $kuk_u = count( (array) $e['kuk'] );
+                        $n_kuk += $kuk_u;
+                    }
+                }
+                if ( empty( $elemen ) || 0 === $kuk_u ) {
+                    $n_tanpa++;
+                }
+            }
+
+            if ( $n_unit > 0 && 0 === $n_tanpa ) {
+                $status = 'lengkap';
+            } elseif ( $n_unit > 0 ) {
+                $status = 'sebagian';
+            } else {
+                $status = 'kosong';
+            }
+
+            $n_kegiatan = 0;
+            if ( $has_kegiatan ) {
+                $n_kegiatan = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$kegiatan_table} WHERE skema_id = %d", $post->ID ) );
+            }
+
+            $rows[] = array(
+                'id'         => $post->ID,
+                'title'      => $post->post_title,
+                'kode'       => get_post_meta( $post->ID, 'kode_skema', true ),
+                'unit'       => $n_unit,
+                'elemen'     => $n_elemen,
+                'kuk'        => $n_kuk,
+                'tanpa'      => $n_tanpa,
+                'status'     => $status,
+                'kegiatan'   => $n_kegiatan,
+                'punya_meta' => ( count( get_post_meta( $post->ID, 'skkni_data', true ) ) > 0 ),
+            );
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Parsing teks import menjadi struktur skkni_data.
+     *
+     * Format baris:
+     *   UNIT: KODE | JUDUL UNIT
+     *   ELEMEN: 1 | Nama Elemen
+     *   KUK: 1.1 Teks kriteria unjuk kerja
+     *
+     * Format JSON juga diterima: array unit, atau { "units": [...] }.
+     *
+     * @param string $raw
+     * @return array{units:array,errors:string[]}
+     */
+    public function parse_skkni_import_text( $raw ) {
+        $errors = array();
+        $units  = array();
+        $raw    = trim( (string) $raw );
+
+        if ( '' === $raw ) {
+            return array( 'units' => array(), 'errors' => array( 'Teks import masih kosong.' ) );
+        }
+
+        $first = substr( ltrim( $raw ), 0, 1 );
+
+        if ( '{' === $first || '[' === $first ) {
+            $decoded = json_decode( $raw, true );
+            if ( JSON_ERROR_NONE !== json_last_error() ) {
+                return array( 'units' => array(), 'errors' => array( 'JSON tidak valid: ' . json_last_error_msg() ) );
+            }
+            if ( isset( $decoded['units'] ) ) {
+                $decoded = $decoded['units'];
+            }
+            if ( ! is_array( $decoded ) ) {
+                return array( 'units' => array(), 'errors' => array( 'Struktur JSON harus berupa array unit.' ) );
+            }
+            foreach ( $decoded as $i => $u ) {
+                $kode  = trim( (string) ( $u['kode_unit'] ?? $u['kode'] ?? '' ) );
+                $judul = trim( (string) ( $u['judul_unit'] ?? $u['judul'] ?? '' ) );
+                if ( '' === $kode || '' === $judul ) {
+                    $errors[] = 'JSON unit #' . ( $i + 1 ) . ': kode_unit dan judul_unit wajib diisi.';
+                    continue;
+                }
+                $elemen_out = array();
+                foreach ( (array) ( $u['elemen'] ?? array() ) as $j => $e ) {
+                    $nama = trim( (string) ( $e['nama'] ?? $e['elemen'] ?? '' ) );
+                    if ( '' === $nama ) {
+                        $errors[] = 'JSON ' . $kode . ' elemen #' . ( $j + 1 ) . ': nama elemen kosong.';
+                        continue;
+                    }
+                    $kuk_out = array();
+                    foreach ( (array) ( $e['kuk'] ?? array() ) as $k ) {
+                        $k = is_array( $k ) ? ( $k['teks'] ?? $k['text'] ?? '' ) : $k;
+                        $k = trim( (string) $k );
+                        if ( '' !== $k ) {
+                            $kuk_out[] = $k;
+                        }
+                    }
+                    if ( empty( $kuk_out ) ) {
+                        $errors[] = 'JSON ' . $kode . ' elemen "' . $nama . '": KUK kosong.';
+                    }
+                    $elemen_out[] = array(
+                        'nomor' => isset( $e['nomor'] ) ? (int) $e['nomor'] : ( $j + 1 ),
+                        'nama'  => $nama,
+                        'kuk'   => $kuk_out,
+                    );
+                }
+                if ( empty( $elemen_out ) ) {
+                    $errors[] = 'JSON ' . $kode . ': tidak ada elemen.';
+                }
+                $units[] = array( 'kode_unit' => $kode, 'judul_unit' => $judul, 'elemen' => $elemen_out );
+            }
+
+            return array( 'units' => $units, 'errors' => $errors );
+        }
+
+        $lines     = preg_split( '/\R/', $raw );
+        $cur_unit  = null;
+        $cur_elemen = null;
+
+        foreach ( $lines as $idx => $line ) {
+            $no   = $idx + 1;
+            $line = trim( $line );
+            if ( '' === $line || 0 === strpos( $line, '#' ) ) {
+                continue;
+            }
+
+            if ( preg_match( '/^UNIT\s*:\s*(.+)$/iu', $line, $m ) ) {
+                $parts = explode( '|', $m[1], 2 );
+                $kode  = trim( $parts[0] );
+                $judul = isset( $parts[1] ) ? trim( $parts[1] ) : '';
+                if ( '' === $kode || '' === $judul ) {
+                    $errors[] = "Baris {$no}: UNIT harus berformat \"KODE | JUDUL UNIT\".";
+                    $cur_unit = null;
+                    $cur_elemen = null;
+                    continue;
+                }
+                $units[]    = array( 'kode_unit' => $kode, 'judul_unit' => $judul, 'elemen' => array() );
+                $cur_unit   = count( $units ) - 1;
+                $cur_elemen = null;
+                continue;
+            }
+
+            if ( preg_match( '/^ELEMEN\s*:\s*(.+)$/iu', $line, $m ) ) {
+                if ( null === $cur_unit ) {
+                    $errors[] = "Baris {$no}: ELEMEN ditemukan sebelum UNIT.";
+                    continue;
+                }
+                $parts = explode( '|', $m[1], 2 );
+                if ( isset( $parts[1] ) && ctype_digit( trim( $parts[0] ) ) ) {
+                    $nomor = (int) trim( $parts[0] );
+                    $nama  = trim( $parts[1] );
+                } else {
+                    $nomor = count( $units[ $cur_unit ]['elemen'] ) + 1;
+                    $nama  = trim( $m[1] );
+                }
+                if ( '' === $nama ) {
+                    $errors[] = "Baris {$no}: nama ELEMEN kosong.";
+                    continue;
+                }
+                $units[ $cur_unit ]['elemen'][] = array( 'nomor' => $nomor, 'nama' => $nama, 'kuk' => array() );
+                $cur_elemen = count( $units[ $cur_unit ]['elemen'] ) - 1;
+                continue;
+            }
+
+            if ( preg_match( '/^KUK\s*:\s*(.+)$/iu', $line, $m ) ) {
+                if ( null === $cur_elemen ) {
+                    $errors[] = "Baris {$no}: KUK ditemukan sebelum ELEMEN.";
+                    continue;
+                }
+                $teks = trim( $m[1] );
+                if ( '' === $teks ) {
+                    $errors[] = "Baris {$no}: teks KUK kosong.";
+                    continue;
+                }
+                $units[ $cur_unit ]['elemen'][ $cur_elemen ]['kuk'][] = $teks;
+                continue;
+            }
+
+            $errors[] = "Baris {$no}: format tidak dikenal — \"" . mb_substr( $line, 0, 60 ) . '".';
+        }
+
+        if ( empty( $units ) && empty( $errors ) ) {
+            $errors[] = 'Tidak ada unit kompetensi yang terbaca.';
+        }
+
+        foreach ( $units as $u ) {
+            if ( empty( $u['elemen'] ) ) {
+                $errors[] = 'Unit ' . $u['kode_unit'] . ': belum punya elemen.';
+                continue;
+            }
+            foreach ( $u['elemen'] as $e ) {
+                if ( empty( $e['kuk'] ) ) {
+                    $errors[] = 'Unit ' . $u['kode_unit'] . ' elemen "' . $e['nama'] . '": belum punya KUK.';
+                }
+            }
+        }
+
+        return array( 'units' => $units, 'errors' => $errors );
+    }
+
+    /**
+     * Proses form import SKKNI.
+     *
+     * @return array{type:string,html:string}
+     */
+    public function handle_skkni_import() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            return array( 'type' => 'error', 'html' => 'Akses ditolak.' );
+        }
+        if ( ! isset( $_POST['lsp_skkni_import_nonce'] ) || ! wp_verify_nonce( $_POST['lsp_skkni_import_nonce'], 'lsp_skkni_import' ) ) {
+            return array( 'type' => 'error', 'html' => 'Token keamanan tidak valid. Muat ulang halaman lalu coba lagi.' );
+        }
+
+        $skema_id = isset( $_POST['skema_id'] ) ? (int) $_POST['skema_id'] : 0;
+        $dry_run  = ! empty( $_POST['dry_run'] );
+        $raw      = isset( $_POST['skkni_text'] ) ? wp_unslash( $_POST['skkni_text'] ) : '';
+
+        if ( ! $skema_id || 'skema' !== get_post_type( $skema_id ) ) {
+            return array( 'type' => 'error', 'html' => 'Skema tujuan tidak valid.' );
+        }
+
+        $parsed = $this->parse_skkni_import_text( $raw );
+
+        if ( ! empty( $parsed['errors'] ) ) {
+            $list = '';
+            foreach ( array_slice( $parsed['errors'], 0, 25 ) as $err ) {
+                $list .= '<li>' . esc_html( $err ) . '</li>';
+            }
+            $more = count( $parsed['errors'] ) > 25 ? '<p>… dan ' . ( count( $parsed['errors'] ) - 25 ) . ' kesalahan lain.</p>' : '';
+            return array(
+                'type' => 'error',
+                'html' => '<strong>Import dibatalkan — data tidak disimpan.</strong><ul style="margin-left:18px;list-style:disc;">' . $list . '</ul>' . $more,
+            );
+        }
+
+        $units     = $parsed['units'];
+        $n_elemen  = 0;
+        $n_kuk     = 0;
+        $unit_lines = array();
+        foreach ( $units as $u ) {
+            $unit_lines[] = $u['kode_unit'] . ' | ' . $u['judul_unit'];
+            foreach ( $u['elemen'] as $e ) {
+                $n_elemen++;
+                $n_kuk += count( $e['kuk'] );
+            }
+        }
+
+        $ringkas = count( $units ) . ' unit, ' . $n_elemen . ' elemen, ' . $n_kuk . ' KUK';
+
+        if ( $dry_run ) {
+            return array(
+                'type' => 'updated',
+                'html' => '<strong>Validasi lolos (uji coba, belum disimpan):</strong> ' . esc_html( $ringkas ) . ' untuk skema <em>' . esc_html( get_the_title( $skema_id ) ) . '</em>.',
+            );
+        }
+
+        update_post_meta( $skema_id, 'skkni_data', $units );
+        update_post_meta( $skema_id, 'unit_kompetensi', implode( "\n", $unit_lines ) );
+
+        return array(
+            'type' => 'updated',
+            'html' => '<strong>Tersimpan:</strong> ' . esc_html( $ringkas ) . ' untuk skema <em>' . esc_html( get_the_title( $skema_id ) ) . '</em>. '
+                . 'Pencetakan FR.APL.02 / FR.IA.01 untuk skema ini sudah terbuka kembali.',
+        );
+    }
+
+    /**
+     * Halaman admin: kelayakan & migrasi data SKKNI.
+     */
+    public function render_skkni_migration_page() {
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_die( 'Akses ditolak.' );
+        }
+
+        $notice = array();
+        if ( isset( $_POST['lsp_skkni_import_submit'] ) ) {
+            $notice = $this->handle_skkni_import();
+        }
+
+        $rows    = $this->collect_skkni_status_rows();
+        $summary = array( 'lengkap' => 0, 'sebagian' => 0, 'kosong' => 0 );
+        foreach ( $rows as $r ) {
+            $summary[ $r['status'] ]++;
+        }
+
+        $badge = array(
+            'lengkap'  => array( 'Lengkap', '#16a34a', '#dcfce7' ),
+            'sebagian' => array( 'Belum lengkap', '#b45309', '#fef3c7' ),
+            'kosong'   => array( 'Tanpa data SKKNI', '#b91c1c', '#fee2e2' ),
+        );
+        ?>
+        <div class="wrap">
+            <h1>Kelayakan &amp; Migrasi Data SKKNI</h1>
+
+            <?php if ( ! empty( $notice ) ) : ?>
+                <div class="notice notice-<?php echo esc_attr( $notice['type'] ); ?> is-dismissible"><p><?php echo wp_kses_post( $notice['html'] ); ?></p></div>
+            <?php endif; ?>
+
+            <p style="max-width:900px;">
+                Halaman ini memeriksa apakah setiap Master Skema sudah memiliki <strong>Unit, Elemen, dan KUK</strong>
+                yang berasal dari SKKNI resmi. Skema yang belum lengkap tetap tampil di website, tetapi
+                <strong>pencetakan FR.APL.02 dan FR.IA.01 ditahan</strong> sampai datanya dilengkapi.
+            </p>
+
+            <p>
+                <strong><?php echo count( $rows ); ?></strong> skema &middot;
+                <span style="color:#16a34a;"><?php echo (int) $summary['lengkap']; ?> lengkap</span> &middot;
+                <span style="color:#b45309;"><?php echo (int) $summary['sebagian']; ?> belum lengkap</span> &middot;
+                <span style="color:#b91c1c;"><?php echo (int) $summary['kosong']; ?> tanpa data</span>
+            </p>
+
+            <table class="widefat striped" style="max-width:1100px;">
+                <thead>
+                    <tr>
+                        <th style="width:40px;">No</th>
+                        <th>Skema</th>
+                        <th style="width:140px;">Kode</th>
+                        <th style="width:70px;text-align:center;">Unit</th>
+                        <th style="width:80px;text-align:center;">Elemen</th>
+                        <th style="width:70px;text-align:center;">KUK</th>
+                        <th style="width:140px;">Status</th>
+                        <th style="width:110px;text-align:center;">Kegiatan</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php if ( empty( $rows ) ) : ?>
+                    <tr><td colspan="8">Belum ada Master Skema.</td></tr>
+                <?php else : ?>
+                    <?php foreach ( $rows as $i => $r ) :
+                        $b = $badge[ $r['status'] ];
+                    ?>
+                        <tr>
+                            <td><?php echo $i + 1; ?></td>
+                            <td><a href="<?php echo esc_url( admin_url( 'post.php?post=' . $r['id'] . '&action=edit' ) ); ?>"><strong><?php echo esc_html( $r['title'] ); ?></strong></a></td>
+                            <td><code><?php echo esc_html( $r['kode'] ? $r['kode'] : '—' ); ?></code></td>
+                            <td style="text-align:center;"><?php echo (int) $r['unit']; ?></td>
+                            <td style="text-align:center;"><?php echo (int) $r['elemen']; ?></td>
+                            <td style="text-align:center;"><?php echo (int) $r['kuk']; ?></td>
+                            <td><span style="background:<?php echo esc_attr( $b[2] ); ?>;color:<?php echo esc_attr( $b[1] ); ?>;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600;"><?php echo esc_html( $b[0] ); ?></span></td>
+                            <td style="text-align:center;"><?php echo $r['kegiatan'] > 0 ? (int) $r['kegiatan'] : '—'; ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                </tbody>
+            </table>
+
+            <hr style="margin:32px 0;">
+
+            <h2>Import Elemen &amp; KUK</h2>
+            <p style="max-width:900px;">
+                Tempel data SKKNI untuk satu skema. Satu skema satu kali import; import ulang akan
+                <strong>menimpa</strong> data skema tersebut. Gunakan <em>uji coba</em> dulu untuk memeriksa hasil parsing.
+            </p>
+
+            <form method="post" style="max-width:900px;">
+                <?php wp_nonce_field( 'lsp_skkni_import', 'lsp_skkni_import_nonce' ); ?>
+                <table class="form-table">
+                    <tr>
+                        <th><label for="skema_id">Skema tujuan</label></th>
+                        <td>
+                            <select name="skema_id" id="skema_id" required style="min-width:380px;">
+                                <option value="">— pilih skema —</option>
+                                <?php foreach ( $rows as $r ) : ?>
+                                    <option value="<?php echo (int) $r['id']; ?>">
+                                        <?php echo esc_html( $r['title'] ); ?><?php echo $r['kode'] ? ' (' . esc_html( $r['kode'] ) . ')' : ''; ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><label for="skkni_text">Data SKKNI</label></th>
+                        <td>
+                            <textarea name="skkni_text" id="skkni_text" rows="16" style="width:100%;font-family:monospace;font-size:13px;" placeholder="UNIT: J.63OPR00.004.2 | Menggunakan Perangkat Lunak Pengolah Kata Tingkat Dasar&#10;ELEMEN: 1 | Membuat dokumen&#10;KUK: 1.1 Aplikasi pengolah kata dibuka.&#10;KUK: 1.2 Dokumen baru dibuat sesuai kebutuhan.&#10;ELEMEN: 2 | Menyimpan dokumen&#10;KUK: 2.1 Dokumen disimpan pada folder yang ditentukan."></textarea>
+                            <p class="description">
+                                Format baris: <code>UNIT: KODE | JUDUL</code>, <code>ELEMEN: nomor | nama</code>, <code>KUK: teks</code>.
+                                Baris diawali <code>#</code> diabaikan. JSON juga diterima.
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Mode</th>
+                        <td>
+                            <label><input type="checkbox" name="dry_run" value="1" checked> Uji coba (validasi saja, jangan simpan)</label>
+                        </td>
+                    </tr>
+                </table>
+                <p>
+                    <button type="submit" name="lsp_skkni_import_submit" value="1" class="button button-primary">Proses</button>
+                </p>
+            </form>
+        </div>
+        <?php
     }
 }
 

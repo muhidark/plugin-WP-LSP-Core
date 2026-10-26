@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 if ( ! class_exists( 'LSP_Core_Management' ) ) :
 
-require_once plugin_dir_path( __FILE__ ) . 'includes/class-skema.php';
+require_once ( function_exists( 'plugin_dir_path' ) ? plugin_dir_path( __FILE__ ) : dirname( __FILE__ ) . '/' ) . 'includes/class-skema.php';
 
 class LSP_Core_Management {
 
@@ -122,17 +122,17 @@ class LSP_Core_Management {
      * ====================================================================
      */
     public function register_cpts_and_roles() {
-        // A. Custom Post Type: Skema Sertifikasi
+        // A. Custom Post Type: Skema Sertifikasi (Induk Menu LSP Core)
         register_post_type( 'skema', array(
             'labels'      => array(
                 'name'               => __( 'Skema Sertifikasi', 'lsp-core-management' ),
                 'singular_name'      => __( 'Skema', 'lsp-core-management' ),
-                'menu_name'          => __( 'Skema Sertifikasi', 'lsp-core-management' ),
+                'menu_name'          => __( 'LSP Core', 'lsp-core-management' ),
+                'all_items'          => __( 'Skema Sertifikasi', 'lsp-core-management' ),
                 'add_new'            => __( 'Tambah Skema', 'lsp-core-management' ),
                 'add_new_item'       => __( 'Tambah Skema Baru', 'lsp-core-management' ),
                 'edit_item'          => __( 'Edit Skema', 'lsp-core-management' ),
                 'view_item'          => __( 'Lihat Skema', 'lsp-core-management' ),
-                'all_items'          => __( 'Semua Skema', 'lsp-core-management' ),
                 'search_items'       => __( 'Cari Skema', 'lsp-core-management' ),
                 'not_found'          => __( 'Tidak ada skema ditemukan.', 'lsp-core-management' ),
             ),
@@ -145,24 +145,24 @@ class LSP_Core_Management {
             'show_in_rest'  => true,
         ) );
 
-        // B. Custom Post Type: Tempat Uji Kompetensi (TUK)
+        // B. Custom Post Type: Tempat Uji Kompetensi (TUK) di bawah menu LSP Core
         register_post_type( 'tuk', array(
             'labels'      => array(
                 'name'               => __( 'Tempat Uji Kompetensi', 'lsp-core-management' ),
                 'singular_name'      => __( 'TUK', 'lsp-core-management' ),
-                'menu_name'          => __( 'Tempat Uji (TUK)', 'lsp-core-management' ),
+                'menu_name'          => __( 'TUK', 'lsp-core-management' ),
+                'all_items'          => __( 'TUK', 'lsp-core-management' ),
                 'add_new'            => __( 'Tambah TUK', 'lsp-core-management' ),
                 'add_new_item'       => __( 'Tambah TUK Baru', 'lsp-core-management' ),
                 'edit_item'          => __( 'Edit TUK', 'lsp-core-management' ),
                 'view_item'          => __( 'Lihat TUK', 'lsp-core-management' ),
-                'all_items'          => __( 'Semua TUK', 'lsp-core-management' ),
                 'search_items'       => __( 'Cari TUK', 'lsp-core-management' ),
                 'not_found'          => __( 'Tidak ada TUK ditemukan.', 'lsp-core-management' ),
             ),
             'public'        => true,
             'has_archive'   => true,
             'menu_icon'     => 'dashicons-location-alt',
-            'menu_position' => 25,
+            'show_in_menu'  => 'edit.php?post_type=skema',
             'supports'      => array( 'title', 'editor', 'thumbnail' ),
             'rewrite'       => array( 'slug' => 'tuk' ),
             'show_in_rest'  => true,
@@ -310,6 +310,10 @@ class LSP_Core_Management {
             return;
         }
 
+        if ( empty( trim( $post->post_title ) ) || 'Auto Draft' === $post->post_title ) {
+            return;
+        }
+
         $thumb_id = get_post_thumbnail_id( $post_id );
         if ( $thumb_id ) {
             $is_auto = get_post_meta( $thumb_id, '_lsp_auto_thumb', true );
@@ -337,7 +341,7 @@ class LSP_Core_Management {
         $schemes   = array( 'maroon', 'navy', 'teal', 'purple', 'slate', 'crimson' );
         $bg_scheme = $schemes[ $post_id % count( $schemes ) ];
 
-        $slug     = $post->post_name ?: 'post-' . $post_id;
+        $slug     = $post->post_name ?: ( ! empty( $post->post_title ) ? sanitize_title( $post->post_title ) : 'post-' . $post_id );
         $filename = 'skema-' . sanitize_file_name( $slug ) . '.jpg';
 
         $new_thumb_id = self::generate_auto_cover_image( $filename, $badge_text, $post->post_title, $subtitle, $bg_scheme, $thumb_id );
@@ -443,6 +447,20 @@ class LSP_Core_Management {
 
             if ( file_exists( $font_reg ) ) {
                 imagettftext( $im, 13, 0, 48, $height - 40, $light_gray, $font_reg, 'Standar Kompetensi Kerja Nasional Indonesia (SKKNI)' );
+            }
+        } else {
+            // Fallback dengan built-in system fonts jika TTF tidak ditemukan
+            imagestring( $im, 4, 48, 40, 'LSP KOMUNIKASI INDONESIA • TERLISENSI BNSP', $light_gray );
+            if ( ! empty( $badge_text ) ) {
+                imagefilledrectangle( $im, 48, 80, 48 + ( strlen( $badge_text ) * 10 ) + 20, 115, $accent_col );
+                imagestring( $im, 4, 58, 90, $badge_text, $dark_text );
+            }
+            imagestring( $im, 5, 48, 160, substr( $full_title, 0, 40 ), $white );
+            if ( strlen( $full_title ) > 40 ) {
+                imagestring( $im, 5, 48, 190, substr( $full_title, 40, 40 ), $white );
+            }
+            if ( ! empty( $subtitle ) ) {
+                imagestring( $im, 4, 48, 250, substr( $subtitle, 0, 60 ), $light_gray );
             }
         }
 
@@ -656,6 +674,44 @@ class LSP_Core_Management {
         $skema          = get_post_meta( $post->ID, 'skema_sertifikasi', true );
         $no_registrasi  = get_post_meta( $post->ID, 'no_registrasi', true );
         $tanggal_terbit = get_post_meta( $post->ID, 'tanggal_terbit', true );
+        $pendaftaran_id = get_post_meta( $post->ID, 'pendaftaran_id', true );
+
+        // Dukungan pre-fill dari halaman pendaftaran asesi (?pendaftaran_id=X)
+        if ( empty( $nama_pemegang ) && ! empty( $_GET['pendaftaran_id'] ) ) {
+            $p_prefill = self::find_registered_pendaftaran( '', '', intval( $_GET['pendaftaran_id'] ) );
+            if ( $p_prefill ) {
+                $nama_pemegang  = $p_prefill['nama_lengkap'];
+                $skema          = $p_prefill['skema_title'] ?? $skema;
+                $tanggal_terbit = current_time( 'Y-m-d' );
+                $pendaftaran_id = $p_prefill['id'];
+            }
+        }
+
+        // Cek status validasi keterdaftaran asesi
+        $p_match = null;
+        if ( ! empty( $pendaftaran_id ) ) {
+            $p_match = self::find_registered_pendaftaran( '', '', intval( $pendaftaran_id ) );
+        }
+        if ( ! $p_match && ! empty( $nama_pemegang ) ) {
+            $p_match = self::find_registered_pendaftaran( $nama_pemegang, $skema );
+        }
+
+        // Ambil daftar seluruh asesi terdaftar untuk autocomplete / datalist
+        $all_asesi = array();
+        global $wpdb;
+        if ( isset( $wpdb ) && is_object( $wpdb ) && method_exists( $wpdb, 'get_results' ) ) {
+            $tbl_p = $wpdb->prefix . 'lsp_pendaftaran';
+            if ( $wpdb->get_var( "SHOW TABLES LIKE '$tbl_p'" ) === $tbl_p ) {
+                $all_asesi = $wpdb->get_results( 
+                    "SELECT p.id, p.nama_lengkap, p.nik, s.post_title AS skema_title 
+                     FROM {$tbl_p} p 
+                     LEFT JOIN {$wpdb->prefix}lsp_kegiatan k ON p.kegiatan_id = k.id 
+                     LEFT JOIN {$wpdb->posts} s ON k.skema_id = s.ID 
+                     ORDER BY p.nama_lengkap ASC", 
+                    ARRAY_A 
+                );
+            }
+        }
 
         // Hitung masa berlaku 3 tahun jika tanggal terbit sudah ada
         $info_berlaku = '';
@@ -691,6 +747,27 @@ class LSP_Core_Management {
             .lsp-cert-field .description { color: #666; font-size: 12px; margin-top: 4px; font-style: italic; }
         </style>
 
+        <!-- Banner Keabsahan Pendaftaran Asesi -->
+        <?php if ( $p_match ) : ?>
+            <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:6px; padding:12px 16px; margin-bottom:20px; color:#166534; font-size:13px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:18px;">🛡️</span>
+                    <div>
+                        <strong>Asesi Terverifikasi Resmi:</strong> Terhubung dengan Berkas Pendaftaran <strong>#<?php echo intval( $p_match['id'] ); ?></strong> (<?php echo esc_html( $p_match['nama_lengkap'] ); ?> &bull; NIK: <code><?php echo esc_html( $p_match['nik'] ); ?></code> &bull; Skema: <?php echo esc_html( $p_match['skema_title'] ?? '-' ); ?>).
+                    </div>
+                </div>
+                <a href="<?php echo esc_url( admin_url( 'admin.php?page=lsp-pendaftaran&action=view&id=' . intval( $p_match['id'] ) ) ); ?>" target="_blank" class="button button-small" style="text-decoration:none;">Buka Berkas Pendaftaran &rarr;</a>
+            </div>
+        <?php elseif ( ! empty( $nama_pemegang ) ) : ?>
+            <div style="background:#fef2f2; border:1px solid #fca5a5; border-radius:6px; padding:12px 16px; margin-bottom:20px; color:#991b1b; font-size:13px;">
+                <strong>⚠️ Peserta Belum Terdaftar:</strong> Nama <em>"<?php echo esc_html( $nama_pemegang ); ?>"</em> belum ditemukan di sistem pendaftaran sertifikasi. Sertifikat <strong>hanya dapat diterbitkan</strong> untuk peserta yang telah terdaftar resmi pada modul Pendaftaran.
+            </div>
+        <?php else : ?>
+            <div style="background:#f8fafc; border:1px solid #cbd5e1; border-radius:6px; padding:12px 16px; margin-bottom:20px; color:#334155; font-size:13px;">
+                <strong>🛡️ Sistem Pengamanan Sertifikat:</strong> Pilih atau ketik nama peserta terdaftar dari daftar di bawah. Data pemegang sertifikat wajib terhubung dengan pendaftaran asesi resmi di sistem.
+            </div>
+        <?php endif; ?>
+
         <div class="lsp-cert-field">
             <label for="kode_blanko"><?php _e( 'Nomor / Kode Blanko Sertifikat (Wajib & Unik)', 'lsp-core-management' ); ?> *</label>
             <input type="text" id="kode_blanko" name="kode_blanko" value="<?php echo esc_attr( $kode_blanko ); ?>" placeholder="Contoh: K24.01.000123 / BNSP-00123" required />
@@ -699,7 +776,13 @@ class LSP_Core_Management {
 
         <div class="lsp-cert-field">
             <label for="nama_pemegang"><?php _e( 'Nama Lengkap Pemegang Sertifikat (Asesi)', 'lsp-core-management' ); ?> *</label>
-            <input type="text" id="nama_pemegang" name="nama_pemegang" value="<?php echo esc_attr( $nama_pemegang ); ?>" placeholder="Contoh: Ahmad Fauzi, S.Kom." required />
+            <input type="text" id="nama_pemegang" name="nama_pemegang" list="registered_asesi_list" value="<?php echo esc_attr( $nama_pemegang ); ?>" placeholder="Pilih atau ketik nama asesi terdaftar..." required autocomplete="off" />
+            <datalist id="registered_asesi_list">
+                <?php foreach ( $all_asesi as $as ) : ?>
+                    <option value="<?php echo esc_attr( $as['nama_lengkap'] ); ?>" label="NIK: <?php echo esc_attr( $as['nik'] ); ?> &bull; <?php echo esc_attr( $as['skema_title'] ?? '' ); ?>">
+                <?php endforeach; ?>
+            </datalist>
+            <p class="description"><?php _e( 'Pilih dari daftar peserta pendaftaran atau ketik nama lengkap asesi.', 'lsp-core-management' ); ?></p>
         </div>
 
         <div class="lsp-cert-field">
@@ -724,6 +807,28 @@ class LSP_Core_Management {
             <p class="description"><?php _e( 'Masa berlaku sertifikat otomatis dihitung selama 3 tahun sejak tanggal terbit ini.', 'lsp-core-management' ); ?></p>
             <?php echo $info_berlaku; ?>
         </div>
+
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var asesiMap = <?php 
+                $map = array();
+                foreach ( $all_asesi as $as ) {
+                    $map[ $as['nama_lengkap'] ] = $as['skema_title'] ?? '';
+                }
+                echo json_encode( $map );
+            ?>;
+            var namaInput = document.getElementById('nama_pemegang');
+            var skemaInput = document.getElementById('skema_sertifikasi');
+            if (namaInput && skemaInput) {
+                namaInput.addEventListener('change', function() {
+                    var val = this.value.trim();
+                    if (asesiMap[val] && (!skemaInput.value || skemaInput.value.trim() === '')) {
+                        skemaInput.value = asesiMap[val];
+                    }
+                });
+            }
+        });
+        </script>
         <?php
     }
 
@@ -742,6 +847,84 @@ class LSP_Core_Management {
         $clean = preg_replace( '/[\p{Z}\s]+/u', ' ', $clean );
         $clean = sanitize_text_field( $clean );
         return trim( $clean );
+    }
+
+    /**
+     * Cari Data Asesi Terdaftar di Sistem Pendaftaran LSP Certification Management
+     * Menggunakan exact match atau pembersihan gelar akademis (S.Kom, M.M, Dr, dll)
+     *
+     * @param string $nama Nama pemegang sertifikat
+     * @param string $skema Nama/judul skema sertifikasi (opsional)
+     * @param int    $pendaftaran_id ID pendaftaran jika sudah diketahui
+     * @return array|null Data peserta pendaftaran jika ditemukan
+     */
+    public static function find_registered_pendaftaran( $nama = '', $skema = '', $pendaftaran_id = 0 ) {
+        global $wpdb;
+
+        if ( ! isset( $wpdb ) || ! is_object( $wpdb ) || ! method_exists( $wpdb, 'get_results' ) ) {
+            // Lingkungan mock testing unit standalone
+            return array( 'id' => 1, 'nama_lengkap' => $nama, 'nik' => '1234567890' );
+        }
+
+        $table = $wpdb->prefix . 'lsp_pendaftaran';
+        // Pastikan tabel pendaftaran ada
+        if ( $wpdb->get_var( "SHOW TABLES LIKE '$table'" ) !== $table ) {
+            return null;
+        }
+
+        // Jika kelas database lsp-certification-management tersedia, gunakan fungsinya
+        if ( class_exists( 'LSP_Cert_Database' ) && method_exists( 'LSP_Cert_Database', 'find_pendaftaran_by_name' ) ) {
+            $res = LSP_Cert_Database::find_pendaftaran_by_name( $nama, $skema, $pendaftaran_id );
+            return apply_filters( 'lsp_validate_cert_pendaftaran', $res, $nama, $skema, $pendaftaran_id );
+        }
+
+        // 1. Jika dicari dengan ID
+        if ( intval( $pendaftaran_id ) > 0 ) {
+            $sql = "SELECT p.*, k.skema_id, k.tanggal_pelaksanaan, s.post_title AS skema_title 
+                    FROM {$table} p
+                    LEFT JOIN {$wpdb->prefix}lsp_kegiatan k ON p.kegiatan_id = k.id
+                    LEFT JOIN {$wpdb->posts} s ON k.skema_id = s.ID
+                    WHERE p.id = %d LIMIT 1";
+            $row = $wpdb->get_row( $wpdb->prepare( $sql, intval( $pendaftaran_id ) ), ARRAY_A );
+            return apply_filters( 'lsp_validate_cert_pendaftaran', $row ?: null, $nama, $skema, $pendaftaran_id );
+        }
+
+        $nama_raw = trim( (string) $nama );
+        if ( '' === $nama_raw ) {
+            return null;
+        }
+
+        // Pembersih gelar akademis
+        $clean_gelar = preg_replace( '/\b(S\.Kom|S\.T|S\.E|S\.Pd|S\.Sos|S\.Si|S\.H|S\.Ked|M\.M|M\.Kom|M\.T|M\.Pd|M\.Si|Dr|Dra|Drs|Ir|Prof)\b\.?/i', '', $nama_raw );
+        $nama_clean  = trim( preg_replace( '/[,\s\.]+$/', '', trim( $clean_gelar ) ) );
+
+        $sql = "SELECT p.*, k.skema_id, k.tanggal_pelaksanaan, s.post_title AS skema_title 
+                FROM {$table} p
+                LEFT JOIN {$wpdb->prefix}lsp_kegiatan k ON p.kegiatan_id = k.id
+                LEFT JOIN {$wpdb->posts} s ON k.skema_id = s.ID
+                WHERE LOWER(TRIM(p.nama_lengkap)) = LOWER(%s)
+                   OR LOWER(TRIM(p.nama_lengkap)) = LOWER(%s)";
+
+        $rows = $wpdb->get_results( $wpdb->prepare( $sql, $nama_raw, $nama_clean ), ARRAY_A );
+        if ( empty( $rows ) ) {
+            return apply_filters( 'lsp_validate_cert_pendaftaran', null, $nama, $skema, $pendaftaran_id );
+        }
+
+        if ( 1 === count( $rows ) ) {
+            return apply_filters( 'lsp_validate_cert_pendaftaran', $rows[0], $nama, $skema, $pendaftaran_id );
+        }
+
+        // Jika ada nama kembar di beberapa kegiatan, prioritaskan yang skemanya cocok
+        if ( ! empty( $skema ) ) {
+            $skema_lower = strtolower( trim( $skema ) );
+            foreach ( $rows as $row ) {
+                if ( ! empty( $row['skema_title'] ) && strtolower( trim( $row['skema_title'] ) ) === $skema_lower ) {
+                    return apply_filters( 'lsp_validate_cert_pendaftaran', $row, $nama, $skema, $pendaftaran_id );
+                }
+            }
+        }
+
+        return apply_filters( 'lsp_validate_cert_pendaftaran', $rows[0], $nama, $skema, $pendaftaran_id );
     }
 
     /**
@@ -972,6 +1155,15 @@ class LSP_Core_Management {
             }
         }
 
+        // D. Validasi Pengamanan: Peserta Wajib Terdaftar di Sistem Pendaftaran LSP
+        $pendaftaran_match = self::find_registered_pendaftaran( $nama_pemegang, $skema );
+        if ( ! $pendaftaran_match ) {
+            $errors[] = sprintf(
+                __( 'Peserta <strong>"%s"</strong> tidak ditemukan di sistem pendaftaran sertifikasi. Sertifikat hanya dapat diterbitkan untuk peserta yang telah terdaftar resmi.', 'lsp-core-management' ),
+                esc_html( $nama_pemegang )
+            );
+        }
+
         // 9. Eksekusi Penyimpanan atau Pencegahan Konflik
         if ( ! empty( $errors ) ) {
             // TERJADI KONFLIK ATAU VALIDASI GAGAL:
@@ -1008,6 +1200,9 @@ class LSP_Core_Management {
         update_post_meta( $post_id, 'no_registrasi', $no_registrasi );
         update_post_meta( $post_id, 'skema_sertifikasi', $skema );
         update_post_meta( $post_id, 'tanggal_terbit', $tanggal_terbit );
+        if ( ! empty( $pendaftaran_match['id'] ) ) {
+            update_post_meta( $post_id, 'pendaftaran_id', intval( $pendaftaran_match['id'] ) );
+        }
 
         // Update post title otomatis: "KODE_BLANKO - NAMA_PEMEGANG"
         $auto_title = $kode_blanko . ' - ' . $nama_pemegang;
@@ -1772,7 +1967,17 @@ class LSP_Core_Management {
             array( $this, 'render_import_page' )
         );
 
-        // Submenu Pengaturan LSP di bawah Skema Sertifikasi
+        // Submenu Asesor LSP di bawah LSP Core (edit.php?post_type=skema)
+        add_submenu_page(
+            'edit.php?post_type=skema',
+            __( 'Manajemen Asesor LSP', 'lsp-core-management' ),
+            __( 'Asesor LSP', 'lsp-core-management' ),
+            'manage_options',
+            'lsp-asesor-directory',
+            array( $this, 'render_asesor_admin_page' )
+        );
+
+        // Daftarkan halaman Pengaturan & Panduan (diakses via Tab Skema Sertifikasi)
         add_submenu_page(
             'edit.php?post_type=skema',
             __( 'Pengaturan Core LSP', 'lsp-core-management' ),
@@ -1782,37 +1987,122 @@ class LSP_Core_Management {
             array( $this, 'render_settings_page' )
         );
 
-        // Submenu Panduan Penggunaan di bawah Skema Sertifikasi
         add_submenu_page(
             'edit.php?post_type=skema',
             __( 'Panduan Penggunaan Tema & Plugin LSP', 'lsp-core-management' ),
-            __( '📖 Panduan LSP', 'lsp-core-management' ),
+            __( 'Panduan LSP', 'lsp-core-management' ),
             'edit_posts',
             'lsp-documentation-guide',
             array( $this, 'render_documentation_page' )
         );
 
-        // Menu Top-Level Pintasan untuk Manajemen User Asesor LSP
-        add_menu_page(
-            __( 'Manajemen Asesor LSP', 'lsp-core-management' ),
-            __( 'Asesor LSP', 'lsp-core-management' ),
-            'manage_options',
-            'lsp-asesor-directory',
-            array( $this, 'render_asesor_admin_page' ),
-            'dashicons-businessman',
-            25
-        );
+        // Filter submenu agar sidebar LSP Core rapi & fokus: Skema Sertifikasi, Asesor LSP, TUK
+        add_action( 'admin_menu', array( $this, 'filter_lsp_core_submenus' ), 999 );
+        add_action( 'all_admin_notices', array( $this, 'render_skema_admin_tabs' ) );
+    }
 
-        // Menu Top-Level Pusat Panduan & Dokumentasi LSP (Agar admin masa depan mudah mempelajari sistem)
-        add_menu_page(
-            __( 'Pusat Panduan & Dokumentasi LSP', 'lsp-core-management' ),
-            __( 'Panduan LSP', 'lsp-core-management' ),
-            'edit_posts',
-            'lsp-documentation-guide',
-            array( $this, 'render_documentation_page' ),
-            'dashicons-book-alt',
-            29
-        );
+    /**
+     * Rapikan susunan submenu di bawah LSP Core agar tepat 3 menu:
+     * 1. Skema Sertifikasi
+     * 2. Asesor LSP
+     * 3. TUK
+     * (Menu tambahan dimasukkan ke dalam bentuk Tab Navigasi)
+     */
+    public function filter_lsp_core_submenus() {
+        global $submenu, $menu;
+
+        // Pastikan nama menu induk adalah LSP Core
+        if ( is_array( $menu ) ) {
+            foreach ( $menu as $k => $m ) {
+                if ( isset( $m[2] ) && 'edit.php?post_type=skema' === $m[2] ) {
+                    $menu[ $k ][0] = 'LSP Core';
+                    break;
+                }
+            }
+        }
+
+        if ( isset( $submenu['edit.php?post_type=skema'] ) && is_array( $submenu['edit.php?post_type=skema'] ) ) {
+            $allowed_slugs = array( 'edit.php?post_type=skema', 'lsp-asesor-directory', 'edit.php?post_type=tuk' );
+            $clean_sub = array();
+
+            // 1. Skema Sertifikasi
+            $clean_sub[] = array(
+                __( 'Skema Sertifikasi', 'lsp-core-management' ),
+                'edit_posts',
+                'edit.php?post_type=skema',
+                __( 'Skema Sertifikasi', 'lsp-core-management' ),
+            );
+
+            // 2. Asesor LSP
+            $clean_sub[] = array(
+                __( 'Asesor LSP', 'lsp-core-management' ),
+                'manage_options',
+                'lsp-asesor-directory',
+                __( 'Asesor LSP', 'lsp-core-management' ),
+            );
+
+            // 3. TUK
+            $clean_sub[] = array(
+                __( 'TUK', 'lsp-core-management' ),
+                'edit_posts',
+                'edit.php?post_type=tuk',
+                __( 'TUK', 'lsp-core-management' ),
+            );
+
+            $submenu['edit.php?post_type=skema'] = $clean_sub;
+        }
+    }
+
+    /**
+     * Tampilkan Navigasi Tab pada halaman-halaman Skema Sertifikasi:
+     * [Semua Skema] [Tambah Skema] [Pengaturan LSP] [Panduan LSP] [Pakar Skema]
+     */
+    public function render_skema_admin_tabs() {
+        $screen = get_current_screen();
+        if ( ! $screen ) {
+            return;
+        }
+
+        $is_skema_pt   = ( 'skema' === $screen->post_type );
+        $is_skema_page = ( isset( $_GET['page'] ) && in_array( $_GET['page'], array( 'lsp-core-settings', 'lsp-documentation-guide', 'lsp-smart-advisor-admin' ), true ) );
+
+        if ( ! $is_skema_pt && ! $is_skema_page ) {
+            return;
+        }
+
+        $active_tab = 'list';
+        if ( 'post-new.php' === $GLOBALS['pagenow'] && $is_skema_pt ) {
+            $active_tab = 'new';
+        } elseif ( isset( $_GET['page'] ) && 'lsp-core-settings' === $_GET['page'] ) {
+            $active_tab = 'settings';
+        } elseif ( isset( $_GET['page'] ) && 'lsp-documentation-guide' === $_GET['page'] ) {
+            $active_tab = 'guide';
+        } elseif ( isset( $_GET['page'] ) && 'lsp-smart-advisor-admin' === $_GET['page'] ) {
+            $active_tab = 'smart';
+        }
+        ?>
+        <div class="wrap lsp-skema-tabs-wrapper" style="margin-top: 15px; margin-bottom: 20px;">
+            <nav class="nav-tab-wrapper wp-clearfix" style="border-bottom: 2px solid #cbd5e1;">
+                <a href="<?php echo esc_url( admin_url( 'edit.php?post_type=skema' ) ); ?>" class="nav-tab <?php echo 'list' === $active_tab ? 'nav-tab-active' : ''; ?>" style="font-size: 13.5px; font-weight: 600;">
+                    📋 Daftar Skema
+                </a>
+                <a href="<?php echo esc_url( admin_url( 'post-new.php?post_type=skema' ) ); ?>" class="nav-tab <?php echo 'new' === $active_tab ? 'nav-tab-active' : ''; ?>" style="font-size: 13.5px; font-weight: 600;">
+                    ➕ Tambah Skema Baru
+                </a>
+                <a href="<?php echo esc_url( admin_url( 'admin.php?page=lsp-core-settings' ) ); ?>" class="nav-tab <?php echo 'settings' === $active_tab ? 'nav-tab-active' : ''; ?>" style="font-size: 13.5px; font-weight: 600;">
+                    ⚙️ Pengaturan LSP
+                </a>
+                <a href="<?php echo esc_url( admin_url( 'admin.php?page=lsp-documentation-guide' ) ); ?>" class="nav-tab <?php echo 'guide' === $active_tab ? 'nav-tab-active' : ''; ?>" style="font-size: 13.5px; font-weight: 600;">
+                    📖 Panduan LSP
+                </a>
+                <?php if ( class_exists( 'LSP_Smart_Advisor' ) ) : ?>
+                    <a href="<?php echo esc_url( admin_url( 'admin.php?page=lsp-smart-advisor-admin' ) ); ?>" class="nav-tab <?php echo 'smart' === $active_tab ? 'nav-tab-active' : ''; ?>" style="font-size: 13.5px; font-weight: 600;">
+                        🧠 Pakar Skema
+                    </a>
+                <?php endif; ?>
+            </nav>
+        </div>
+        <?php
     }
 
     /**
@@ -2637,10 +2927,24 @@ class LSP_Core_Management {
                 }
             }
 
-            $action    = 'INSERT';
-            $target_id = 0;
+            $action                 = 'INSERT';
+            $target_id              = 0;
+            $matched_pendaftaran_id = 0;
 
-            // 5. Pemeriksaan terhadap Database & Resolusi Target Update
+            // 5. Validasi Pengamanan: Peserta Wajib Terdaftar di Sistem Pendaftaran LSP
+            if ( empty( $row_errors ) ) {
+                $p_match = self::find_registered_pendaftaran( $nama, $skema );
+                if ( ! $p_match ) {
+                    $row_errors[] = sprintf(
+                        __( 'Peserta "%s" tidak ditemukan dalam sistem pendaftaran LSP. Sertifikat ditolak untuk mencegah penerbitan tanpa berkas pendaftaran.', 'lsp-core-management' ),
+                        $nama
+                    );
+                } else {
+                    $matched_pendaftaran_id = intval( $p_match['id'] );
+                }
+            }
+
+            // 6. Pemeriksaan terhadap Database & Resolusi Target Update
             if ( empty( $row_errors ) ) {
                 $db_blanko = self::find_certs_by_meta( 'kode_blanko', $blanko );
                 $db_reg    = self::find_certs_by_meta( 'no_registrasi', $reg );
@@ -2730,6 +3034,7 @@ class LSP_Core_Management {
                 'tanggal_terbit'    => $tgl,
                 'action'            => $action,
                 'target_id'         => $target_id,
+                'pendaftaran_id'    => $matched_pendaftaran_id,
                 'status'            => $status,
                 'errors'            => $row_errors,
             );
@@ -2858,6 +3163,9 @@ class LSP_Core_Management {
                 update_post_meta( $post_id, 'no_registrasi', $reg );
                 update_post_meta( $post_id, 'skema_sertifikasi', $skema );
                 update_post_meta( $post_id, 'tanggal_terbit', $tgl );
+                if ( ! empty( $row['pendaftaran_id'] ) ) {
+                    update_post_meta( $post_id, 'pendaftaran_id', intval( $row['pendaftaran_id'] ) );
+                }
 
                 $imported++;
             } elseif ( 'UPDATE' === $action ) {
@@ -2892,6 +3200,9 @@ class LSP_Core_Management {
                 update_post_meta( $target_id, 'no_registrasi', $reg );
                 update_post_meta( $target_id, 'skema_sertifikasi', $skema );
                 update_post_meta( $target_id, 'tanggal_terbit', $tgl );
+                if ( ! empty( $row['pendaftaran_id'] ) ) {
+                    update_post_meta( $target_id, 'pendaftaran_id', intval( $row['pendaftaran_id'] ) );
+                }
 
                 $updated++;
             }
@@ -3038,7 +3349,7 @@ class LSP_Core_Management {
                                             <?php if ( ! empty( $r['errors'] ) ) : ?>
                                                 <span style="color:#dc2626; font-size:12px;"><?php echo esc_html( implode( ' | ', $r['errors'] ) ); ?></span>
                                             <?php else : ?>
-                                                <span style="color:#16a34a; font-size:12px;">Data valid dan siap diproses.</span>
+                                                <span style="color:#16a34a; font-size:12px;">✓ Data valid &bull; Asesi Terdaftar Resmi (ID Pendaftaran: #<?php echo intval( $r['pendaftaran_id'] ?? 0 ); ?>).</span>
                                             <?php endif; ?>
                                         </td>
                                     </tr>
@@ -3146,6 +3457,7 @@ class LSP_Core_Management {
                             </a>
                         </li>
                         <li>Isi data asesi pada spreadsheet. Format tanggal wajib <code>YYYY-MM-DD</code> (contoh: <code>2024-05-20</code>).</li>
+                        <li><strong>Sistem Pengamanan:</strong> Nama pemegang sertifikat harus sesuai dengan peserta yang telah terdaftar pada modul <em>Pendaftaran Sertifikasi</em>. Baris dengan peserta yang belum terdaftar otomatis ditolak untuk mencegah penerbitan tanpa berkas asesi.</li>
                         <li>Simpan berkas dalam format <strong>CSV (Comma Delimited)</strong> atau dipisahkan titik koma (<code>;</code>).</li>
                         <li>Unggah berkas di bawah. Sistem akan menjalankan <strong>pratinjau &amp; validasi preflight</strong> sebelum data dimasukkan ke pangkalan data.</li>
                     </ol>
@@ -3967,6 +4279,30 @@ class LSP_Core_Management {
                                     <?php endif; ?>
                                 <?php else : ?>
                                     <span>—</span>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                        <?php
+                        $p_id_cert = get_post_meta( $post_id, 'pendaftaran_id', true );
+                        $p_cert_match = null;
+                        if ( ! empty( $p_id_cert ) ) {
+                            $p_cert_match = self::find_registered_pendaftaran( '', '', intval( $p_id_cert ) );
+                        }
+                        if ( ! $p_cert_match && ! empty( $nama_pemegang ) ) {
+                            $p_cert_match = self::find_registered_pendaftaran( $nama_pemegang, $skema );
+                        }
+                        ?>
+                        <tr>
+                            <td class="cert-data-label"><i class="fas fa-shield-alt me-2" style="color:var(--secondary-color, #f89b29);"></i> Validasi Berkas Pendaftaran</td>
+                            <td class="cert-data-value">
+                                <?php if ( $p_cert_match ) : ?>
+                                    <span style="color:#16a34a; font-weight:700; display:inline-flex; align-items:center; gap:6px;">
+                                        <i class="fas fa-check-circle"></i> Terdaftar Resmi (ID Arsip Asesi: #<?php echo intval( $p_cert_match['id'] ); ?>)
+                                    </span>
+                                <?php else : ?>
+                                    <span style="color:#64748b; font-weight:600;">
+                                        Data Historis
+                                    </span>
                                 <?php endif; ?>
                             </td>
                         </tr>

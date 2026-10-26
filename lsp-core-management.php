@@ -2590,7 +2590,20 @@ class LSP_Core_Management {
     }
 
     /**
-     * Halaman Pengaturan Core LSP (Nomor WhatsApp & URL Pendaftaran)
+     * Persyaratan administratif global (berlaku untuk semua skema).
+     *
+     * Satu-satunya tempat nilai bawaan ditentukan, agar halaman Pengaturan dan
+     * plugin Certification membaca sumber yang sama.
+     *
+     * @return string
+     */
+    public static function get_persyaratan_admin_global() {
+        $default = "1) Fotokopi Kartu Tanda Penduduk (KTP);\n2) Pas foto 3 x 4 sebanyak 3 (tiga) lembar.";
+        return (string) get_option( 'lsp_core_persyaratan_admin', $default );
+    }
+
+    /**
+     * Halaman Pengaturan Core LSP (Nomor WhatsApp, URL Pendaftaran, Persyaratan Administratif)
      */
     public function render_settings_page() {
         if ( ! current_user_can( 'manage_options' ) ) return;
@@ -2599,11 +2612,15 @@ class LSP_Core_Management {
         if ( isset( $_POST['lsp_core_save_settings'] ) && check_admin_referer( 'lsp_core_settings_action', 'lsp_core_settings_nonce' ) ) {
             update_option( 'lsp_core_wa_number', sanitize_text_field( $_POST['lsp_core_wa_number'] ) );
             update_option( 'lsp_core_register_url', esc_url_raw( $_POST['lsp_core_register_url'] ) );
+            if ( isset( $_POST['lsp_core_persyaratan_admin'] ) ) {
+                update_option( 'lsp_core_persyaratan_admin', sanitize_textarea_field( wp_unslash( $_POST['lsp_core_persyaratan_admin'] ) ) );
+            }
             $msg = '<div class="updated notice is-dismissible"><p>Pengaturan LSP berhasil disimpan.</p></div>';
         }
 
         $wa_number = get_option( 'lsp_core_wa_number', '6281328430600' );
         $reg_url   = get_option( 'lsp_core_register_url', '#' );
+        $syarat_admin = self::get_persyaratan_admin_global();
         ?>
         <div class="wrap">
             <h1><?php _e( 'Pengaturan Core LSP', 'lsp-core-management' ); ?></h1>
@@ -2623,6 +2640,16 @@ class LSP_Core_Management {
                         <td>
                             <input type="url" id="lsp_core_register_url" name="lsp_core_register_url" value="<?php echo esc_attr( $reg_url ); ?>" class="regular-text" placeholder="https://..." />
                             <p class="description">Tautan tujuan saat pengunjung mengklik tombol "Daftar Sekarang" pada halaman rincian Skema Sertifikasi.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><label for="lsp_core_persyaratan_admin">Persyaratan Administratif (sama untuk semua skema)</label></th>
+                        <td>
+                            <textarea id="lsp_core_persyaratan_admin" name="lsp_core_persyaratan_admin" rows="5" class="large-text" style="max-width:600px;"><?php echo esc_textarea( $syarat_admin ); ?></textarea>
+                            <p class="description">
+                                Dipakai pada FR.APL.01 dan formulir pendaftaran bila Master Skema tidak mengisi
+                                persyaratan administratifnya sendiri. Satu persyaratan per baris.
+                            </p>
                         </td>
                     </tr>
                 </table>

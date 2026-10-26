@@ -21,13 +21,15 @@ class LSP_Core_Skema {
     }
 
     public function __construct() {
-        // CPT & Hooks
-        add_action( 'init', array( $this, 'register_cpt' ) );
-        add_action( 'add_meta_boxes', array( $this, 'register_meta_boxes' ) );
-        add_action( 'save_post_skema', array( $this, 'save_skema_meta' ) );
-        add_filter( 'manage_skema_posts_columns', array( $this, 'custom_columns' ) );
-        add_action( 'manage_skema_posts_custom_column', array( $this, 'custom_column_content' ), 10, 2 );
-        add_action( 'pre_get_posts', array( $this, 'archive_query' ) );
+        // CPT & Hooks (hanya didaftarkan langsung jika kelas ini dijalankan standalone tanpa LSP_Core_Management)
+        if ( ! class_exists( 'LSP_Core_Management' ) ) {
+            add_action( 'init', array( $this, 'register_cpt' ) );
+            add_action( 'add_meta_boxes', array( $this, 'register_meta_boxes' ) );
+            add_action( 'save_post_skema', array( $this, 'save_skema_meta' ) );
+            add_filter( 'manage_skema_posts_columns', array( $this, 'custom_columns' ) );
+            add_action( 'manage_skema_posts_custom_column', array( $this, 'custom_column_content' ), 10, 2 );
+            add_action( 'pre_get_posts', array( $this, 'archive_query' ) );
+        }
     }
 
     /**
@@ -62,8 +64,8 @@ class LSP_Core_Skema {
      */
     public function register_meta_boxes() {
         add_meta_box(
-            'lsp_skema_detail_meta',
-            __( 'Informasi Skema Sertifikasi & Dokumen SKKNI', 'lsp-core-management' ),
+            'lsp_skema_meta',
+            __( 'Data Detail Skema Sertifikasi & Dokumen SKKNI', 'lsp-core-management' ),
             array( $this, 'render_skema_meta_box' ),
             'skema',
             'normal',
@@ -220,7 +222,7 @@ class LSP_Core_Skema {
                 </div>
                 <div class="skkni-modal-body">
                     <p style="margin-top:0; color:#475569; font-size:13px;">
-                        Salin (copy) teks langsung dari dokumen Word/PDF SKKNI Kemnaker (seperti bagian Kode Unit, Judul, dan tabel Elemen & Kriteria Unjuk Kerja), lalu tempel (paste) di bawah ini. Sistem otomatis memilah menjadi Unit, Elemen, dan KUK.
+                        Salin (copy) teks SKKNI atau data JSON langsung dari <strong>SKKNI Extractor</strong>, lalu tempel (paste) di bawah ini. Sistem otomatis mendeteksi format teks maupun format JSON.
                     </p>
                     <textarea id="skkni-paste-textarea" rows="14" style="width:100%; font-family:monospace; font-size:12.5px;" placeholder="Contoh teks yang bisa ditempel:
 KODE UNIT: M.70MKT00.009.2
@@ -367,7 +369,7 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
 
             function syncHiddenPayload() {
                 var payloadStr = JSON.stringify(units);
-                $('#skkni_data_json_input').val(payloadStr);
+                $('#skkni_data_json_input').val(payloadStr).trigger('change');
             }
 
             function escapeHtml(str) {
@@ -382,6 +384,14 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
 
             // Event Listeners for DOM inputs
             $(document).on('input change', '.input-unit-kode, .input-unit-judul, .input-unit-deskripsi, .input-elemen-nama, .input-elemen-kuk', function() {
+                syncFromDOM();
+            });
+
+            // Pastikan data tersinkronisasi sebelum publish atau save di Gutenberg maupun Classic
+            $(document).on('click', '#publish, #save-post, .editor-post-publish-button, .editor-post-save-draft', function() {
+                syncFromDOM();
+            });
+            $(document).on('submit', '#post, form.metabox-location-normal, .edit-post-layout__metaboxes form', function() {
                 syncFromDOM();
             });
 
@@ -497,8 +507,71 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
                 alert('Berhasil mengimpor ' + parsedUnits.length + ' Unit Kompetensi!');
             });
 
-            // Parser Function
+            // Parser Function (Mendukung Teks SKKNI atau JSON langsung)
             function parseRawSkkniText(text) {
+                var trimmed = text.trim();
+
+                // 1. Cek apakah input berupa format JSON (dari SKKNI Extractor atau backup)
+                if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+                    try {
+                        var parsed = JSON.parse(trimmed);
+                        var rawList = Array.isArray(parsed) ? parsed : (parsed.units || parsed.unit_kompetensi || [parsed]);
+                        var jsonResults = [];
+
+                        $.each(rawList, function(idx, u) {
+                            var kode = u.kode_unit || u.kode || '';
+                            var judul = u.judul_unit || u.judul || '';
+                            var deskripsi = u.deskripsi_unit || u.deskripsi || '';
+                            var rawElems = u.elemen || u.elemen_kompetensi || [];
+                            var elemList = [];
+
+                            $.each(rawElems, function(eIdx, el) {
+                                var eNo = el.nomor || el.nomor_elemen || (eIdx + 1);
+                                var eNama = el.nama || el.nama_elemen || ('Elemen ' + eNo);
+                                var kuks = [];
+                                var rawKuk = el.kuk || [];
+                                if (Array.isArray(rawKuk)) {
+                                    $.each(rawKuk, function(kIdx, k) {
+                                        if (typeof k === 'string') {
+                                            if (k.trim()) kuks.push(k.trim());
+                                        } else if (k && typeof k === 'object') {
+                                            var kNo = k.nomor_kuk || '';
+                                            var kUr = k.uraian_kuk || '';
+                                            var kText = (kNo ? kNo + ' ' : '') + kUr;
+                                            if (kText.trim()) kuks.push(kText.trim());
+                                        }
+                                    });
+                                } else if (typeof rawKuk === 'string') {
+                                    $.each(rawKuk.split('\n'), function(i, l) {
+                                        if (l.trim()) kuks.push(l.trim());
+                                    });
+                                }
+
+                                elemList.push({
+                                    nomor: eNo,
+                                    nama: eNama,
+                                    kuk: kuks
+                                });
+                            });
+
+                            if (kode || judul || elemList.length > 0) {
+                                jsonResults.push({
+                                    kode_unit: kode,
+                                    judul_unit: judul,
+                                    deskripsi_unit: deskripsi,
+                                    elemen: elemList
+                                });
+                            }
+                        });
+
+                        if (jsonResults.length > 0) {
+                            return jsonResults;
+                        }
+                    } catch (e) {
+                        console.warn('Gagal membaca sebagai JSON, beralih ke parser teks:', e);
+                    }
+                }
+
                 var results = [];
                 
                 // Cek apakah ada multiple "KODE UNIT:"
@@ -508,53 +581,26 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
                     block = block.trim();
                     if (!block) return;
 
+                    var lines = block.split("\n");
                     var kode = '';
                     var judul = '';
                     var deskripsi = '';
                     var elemenList = [];
+                    var currentEl = null;
+                    var eNum = 1;
+                    var inDesc = false;
 
-                    // 1. Ekstrak Kode Unit
-                    var mKode = block.match(/KODE\s*UNIT\s*[:\-]\s*([A-Za-z0-9\.\_\-]+)/i);
-                    if (mKode) {
-                        kode = mKode[1].trim();
-                    }
-
-                    // 2. Ekstrak Judul (biasanya baris berikutnya setelah Kode Unit)
-                    var lines = block.split("\n");
-                    var foundKodeLine = -1;
-                    $.each(lines, function(lIdx, line) {
-                        if (line.match(/KODE\s*UNIT/i)) {
-                            foundKodeLine = lIdx;
-                            return false;
-                        }
-                    });
-
-                    if (foundKodeLine !== -1 && lines.length > (foundKodeLine + 1)) {
-                        judul = lines[foundKodeLine + 1].trim();
-                        // Bersihkan judul dari sisa label
-                        judul = judul.replace(/^JUDUL\s*UNIT\s*[:\-]\s*/i, '');
-                    }
-
-                    // 3. Ekstrak Deskripsi jika ada
-                    var mDesc = block.match(/(Unit\s+kompetensi\s+ini\s+berhubungan\s+dengan[^\n\r]+)/i);
-                    if (mDesc) {
-                        deskripsi = mDesc[1].trim();
-                    }
-
-                    // 4. Ekstrak Elemen & KUK dari format Tabel (| Elemen | KUK |) atau list
+                    // 1. Cek format tabel pipe (| Elemen | KUK |) jika ada
                     var tableRows = block.match(/\|([^|\n\r]+)\|([^|\n\r]+)\|/g);
                     if (tableRows && tableRows.length > 0) {
-                        var eNum = 1;
                         $.each(tableRows, function(rIdx, row) {
                             var cols = row.split('|');
                             if (cols.length >= 3) {
                                 var colEl = cols[1].trim();
                                 var colKuk = cols[2].trim();
-
-                                if (colEl.match(/ELEMEN\s*KOMPETENSI/i)) return; // Header
+                                if (colEl.match(/ELEMEN\s*KOMPETENSI/i)) return;
                                 if (!colEl) return;
 
-                                // Parse KUKs
                                 var rawKukItems = colKuk.split(/(?=\d+\.\d+\.?\s+)/);
                                 var cleanKuks = [];
                                 $.each(rawKukItems, function(kIdx, kItem) {
@@ -571,42 +617,92 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
                         });
                     }
 
-                    // Jika tidak ada tabel pipe, cari pola "1. Elemen..." dan "1.1 KUK..."
-                    if (elemenList.length === 0) {
-                        var currentEl = null;
-                        var eNum2 = 1;
+                    // 2. Parser baris per baris yang toleran & akurat
+                    $.each(lines, function(lIdx, rawLine) {
+                        var l = rawLine.trim();
+                        if (!l) return;
 
-                        $.each(lines, function(lIdx, line) {
-                            line = line.trim();
-                            // Pola elemen: "1. Nama Elemen" atau "Elemen 1: Nama"
-                            var mEl = line.match(/^(\d+)\.\s+([A-Za-z][^\.\:\n\r]+)$/);
-                            if (mEl && !line.match(/^\d+\.\d+/)) {
-                                if (currentEl) elemenList.push(currentEl);
-                                currentEl = {
-                                    nomor: eNum2++,
-                                    nama: mEl[2].trim(),
-                                    kuk: []
-                                };
+                        // A. Deteksi KODE UNIT
+                        var mKode = l.match(/^KODE\s*UNIT\s*[:\-]\s*([A-Za-z0-9\.\_\-]+)/i);
+                        if (mKode && !kode) {
+                            kode = mKode[1].trim();
+                            inDesc = false;
+                            return;
+                        }
+
+                        // B. Deteksi JUDUL UNIT (eksplisit label JUDUL UNIT)
+                        var mJudul = l.match(/^JUDUL\s*UNIT\s*[:\-]\s*(.+)/i);
+                        if (mJudul && !judul) {
+                            judul = mJudul[1].trim();
+                            inDesc = false;
+                            return;
+                        }
+
+                        // C. Deteksi DESKRIPSI UNIT (eksplisit label DESKRIPSI UNIT)
+                        var mDescLabel = l.match(/^DESKRIPSI\s*(?:SINGKAT\s*)?UNIT\s*[:\-]?\s*(.*)$/i);
+                        if (mDescLabel) {
+                            deskripsi = mDescLabel[1].trim();
+                            inDesc = true;
+                            return;
+                        }
+
+                        // D. Deteksi Elemen Kompetensi (contoh: "1. Mengidentifikasi...")
+                        var mEl = l.match(/^(\d+)\.\s+([A-Za-z0-9\(].*)$/);
+                        if (mEl && !l.match(/^\d+\.\d+/)) {
+                            inDesc = false;
+                            if (tableRows && tableRows.length > 0) return;
+                            if (currentEl) elemenList.push(currentEl);
+                            currentEl = {
+                                nomor: parseInt(mEl[1], 10) || eNum++,
+                                nama: mEl[2].trim().replace(/\.$/, ''),
+                                kuk: []
+                            };
+                            return;
+                        }
+
+                        // E. Deteksi KUK (contoh: "1.1 Alternatif jaringan...")
+                        var mKuk = l.match(/^(\d+\.\d+)\.?\s+(.+)$/);
+                        if (mKuk && currentEl) {
+                            inDesc = false;
+                            if (tableRows && tableRows.length > 0) return;
+                            currentEl.kuk.push(l);
+                            return;
+                        }
+
+                        // F. Jika sedang dalam blok deskripsi dan belum ketemu elemen, lanjutkan deskripsi (multi-baris)
+                        if (inDesc && !currentEl) {
+                            if (l.match(/^(?:ELEMEN\s*KOMPETENSI|KRITERIA\s*UNJUK|BATASAN\s*VARIABEL|PANDUAN\s*PENILAIAN|NO\b)/i)) {
+                                inDesc = false;
                                 return;
                             }
-
-                            // Pola KUK: "1.1 Pernyataan..."
-                            var mKuk = line.match(/^(\d+\.\d+)\.?\s+(.+)$/);
-                            if (mKuk && currentEl) {
-                                currentEl.kuk.push(line);
-                            }
-                        });
-
-                        if (currentEl) {
-                            elemenList.push(currentEl);
+                            deskripsi += (deskripsi ? ' ' : '') + l;
+                            return;
                         }
+
+                        // G. Jika belum ada judul, baris ini adalah judul (fallback baris setelah kode)
+                        if (!judul && !l.startsWith('|') && !l.match(/^(?:ELEMEN|KRITERIA)/i)) {
+                            judul = l.replace(/^JUDUL\s*UNIT\s*[:\-]\s*/i, '');
+                            inDesc = false;
+                            return;
+                        }
+
+                        // H. Fallback deskripsi tanpa label (pola kalimat pembuka SKKNI)
+                        if (!deskripsi && !currentEl && l.match(/^(Unit\s+(?:kompetensi\s+)?ini\b.*)/i)) {
+                            deskripsi = l;
+                            inDesc = true;
+                            return;
+                        }
+                    });
+
+                    if (currentEl && (!tableRows || tableRows.length === 0)) {
+                        elemenList.push(currentEl);
                     }
 
                     if (kode || judul || elemenList.length > 0) {
                         results.push({
                             kode_unit: kode,
                             judul_unit: judul,
-                            deskripsi_unit: deskripsi,
+                            deskripsi_unit: deskripsi.trim(),
                             elemen: elemenList
                         });
                     }
@@ -631,7 +727,14 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
      * 4. Save Meta Box Skema
      */
     public function save_skema_meta( $post_id ) {
-        if ( ! isset( $_POST['lsp_skema_meta_nonce'] ) ) return;
+        if ( ! isset( $_POST['lsp_skema_meta_nonce'] ) ) {
+            // Jika save dipicu oleh REST API (Gutenberg) atau update judul tanpa nonce metabox,
+            // tetap buatkan auto-thumbnail jika post memiliki judul sah dan bukan auto-draft
+            if ( ( ! defined( 'DOING_AUTOSAVE' ) || ! DOING_AUTOSAVE ) && current_user_can( 'edit_post', $post_id ) ) {
+                $this->maybe_generate_skema_auto_thumbnail( $post_id );
+            }
+            return;
+        }
         if ( ! wp_verify_nonce( $_POST['lsp_skema_meta_nonce'], 'lsp_skema_save_meta' ) ) return;
         if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
         if ( ! current_user_can( 'edit_post', $post_id ) ) return;
@@ -700,7 +803,18 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
             return $skkni_data;
         }
 
-        // Fallback: parse unit_kompetensi (KODE | JUDUL)
+        // Cadangan: daftar unit dari meta unit_kompetensi (KODE | JUDUL).
+        //
+        // Elemen dan KUK TIDAK dikarang di sini. Sebelumnya fungsi ini membuat satu
+        // elemen generik ("Melaksanakan unit kompetensi …") beserta satu KUK generik
+        // untuk setiap unit yang belum punya data SKKNI terstruktur. Data karangan itu
+        // ikut tercetak di dokumen resmi asesmen (FR.APL.02, FR.IA.01) dan tampil di
+        // halaman publik skema.
+        //
+        // Sekarang: unit tetap dikembalikan (kode + judul adalah data master yang sah),
+        // elemen dibiarkan kosong, dan sumber ditandai 'meta_skema' agar konsumen tahu
+        // data kompetensi belum lengkap. Gunakan flag ini untuk menahan pencetakan
+        // dokumen yang mensyaratkan Elemen/KUK.
         $unit_text = get_post_meta( $post_id, 'unit_kompetensi', true );
         if ( empty( $unit_text ) ) {
             return array();
@@ -716,13 +830,8 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
                 $units[] = array(
                     'kode_unit'  => trim( $parts[0] ),
                     'judul_unit' => trim( $parts[1] ),
-                    'elemen'     => array(
-                        array(
-                            'nomor' => 1,
-                            'nama'  => 'Melaksanakan unit kompetensi ' . trim( $parts[1] ),
-                            'kuk'   => array( '1.1 Menerapkan prosedur kerja sesuai standar yang berlaku.' ),
-                        ),
-                    ),
+                    'elemen'     => array(),
+                    'sumber'     => 'meta_skema',
                 );
             }
         }
@@ -781,11 +890,19 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
     }
 
     /**
-     * 7. Auto Thumbnail Generator
+     * 7. Auto Thumbnail Generator (Delegasi ke Master Generator LSP_Core_Management)
      */
     public function maybe_generate_skema_auto_thumbnail( $post_id ) {
+        if ( class_exists( 'LSP_Core_Management' ) ) {
+            return LSP_Core_Management::get_instance()->maybe_generate_skema_auto_thumbnail( $post_id );
+        }
+
         $post = get_post( $post_id );
         if ( ! $post || 'skema' !== $post->post_type || 'auto-draft' === $post->post_status ) {
+            return;
+        }
+
+        if ( empty( trim( $post->post_title ) ) || 'Auto Draft' === $post->post_title ) {
             return;
         }
 
@@ -801,7 +918,8 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
         $kode          = get_post_meta( $post_id, 'kode_skema', true ) ?: 'SKEMA RESMI';
         $jenis_kemasan = get_post_meta( $post_id, 'jenis_kemasan', true ) ?: 'Sertifikasi Profesi';
         $full_title    = $post->post_title;
-        $filename      = 'skema-' . $post->post_name . '-' . $post_id . '.jpg';
+        $slug          = $post->post_name ?: ( ! empty( $post->post_title ) ? sanitize_title( $post->post_title ) : 'post-' . $post_id );
+        $filename      = 'skema-' . sanitize_file_name( $slug ) . '.jpg';
 
         $attach_id = self::generate_auto_cover_image( $filename, $kode, $full_title, $jenis_kemasan, 'maroon', $thumb_id );
         if ( $attach_id && ! is_wp_error( $attach_id ) ) {
@@ -813,6 +931,10 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
      * 8. Engine Generator Gambar Sampul (GD)
      */
     public static function generate_auto_cover_image( $filename, $badge_text, $full_title, $subtitle, $bg_scheme = 'maroon', $existing_attach_id = 0 ) {
+        if ( class_exists( 'LSP_Core_Management' ) ) {
+            return LSP_Core_Management::generate_auto_cover_image( $filename, $badge_text, $full_title, $subtitle, $bg_scheme, $existing_attach_id );
+        }
+
         if ( ! extension_loaded( 'gd' ) ) {
             return false;
         }
@@ -993,8 +1115,9 @@ ELEMEN KOMPETENSI | KRITERIA UNJUK KERJA
                 echo '<td style="padding: 12px; border: 1px solid #ddd; font-family: monospace; font-weight:600;">' . esc_html( $kode_unit ) . '</td>';
                 echo '<td style="padding: 12px; border: 1px solid #ddd;">';
                 echo '<strong>' . esc_html( $judul_unit ) . '</strong>';
-                if ( ! empty( $u['deskripsi_unit'] ) ) {
-                    echo '<div style="font-size:13px; color:#64748b; margin-top:4px;">' . esc_html( $u['deskripsi_unit'] ) . '</div>';
+                $deskripsi_unit = $u['deskripsi_unit'] ?? $u['deskripsi'] ?? '';
+                if ( ! empty( $deskripsi_unit ) ) {
+                    echo '<div style="font-size:13px; color:#64748b; margin-top:4px;">' . esc_html( $deskripsi_unit ) . '</div>';
                 }
                 echo '</td>';
                 echo '<td style="padding: 12px; border: 1px solid #ddd; text-align:center;"><span style="background:#f1f5f9; padding:4px 10px; border-radius:12px; font-size:13px; font-weight:600;">' . $elem_count . ' Elemen</span></td>';

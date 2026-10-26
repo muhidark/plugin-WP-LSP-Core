@@ -4815,27 +4815,52 @@ class LSP_Core_Management {
             }
             if ( isset( $decoded['units'] ) ) {
                 $decoded = $decoded['units'];
+            } elseif ( isset( $decoded['unit_kompetensi'] ) && is_array( $decoded['unit_kompetensi'] ) ) {
+                $decoded = $decoded['unit_kompetensi'];
+            } elseif ( isset( $decoded['kode_unit'] ) ) {
+                // Satu unit saja (bentuk keluaran unit_ke_lsp_dict dari SKKNI Extractor).
+                $decoded = array( $decoded );
             }
             if ( ! is_array( $decoded ) ) {
                 return array( 'units' => array(), 'errors' => array( 'Struktur JSON harus berupa array unit.' ) );
             }
             foreach ( $decoded as $i => $u ) {
+                // Alias: keluaran SKKNI Extractor memakai elemen_kompetensi / nomor_elemen / nama_elemen,
+                // dan KUK berupa objek { nomor_kuk, uraian_kuk }. Semua bentuk itu diterima.
                 $kode  = trim( (string) ( $u['kode_unit'] ?? $u['kode'] ?? '' ) );
                 $judul = trim( (string) ( $u['judul_unit'] ?? $u['judul'] ?? '' ) );
                 if ( '' === $kode || '' === $judul ) {
                     $errors[] = 'JSON unit #' . ( $i + 1 ) . ': kode_unit dan judul_unit wajib diisi.';
                     continue;
                 }
+                $raw_elemen = $u['elemen'] ?? $u['elemen_kompetensi'] ?? array();
+                if ( ! is_array( $raw_elemen ) ) {
+                    $raw_elemen = array();
+                }
+
                 $elemen_out = array();
-                foreach ( (array) ( $u['elemen'] ?? array() ) as $j => $e ) {
-                    $nama = trim( (string) ( $e['nama'] ?? $e['elemen'] ?? '' ) );
+                foreach ( $raw_elemen as $j => $e ) {
+                    if ( ! is_array( $e ) ) {
+                        continue;
+                    }
+                    $nama = trim( (string) ( $e['nama'] ?? $e['nama_elemen'] ?? $e['elemen'] ?? '' ) );
                     if ( '' === $nama ) {
                         $errors[] = 'JSON ' . $kode . ' elemen #' . ( $j + 1 ) . ': nama elemen kosong.';
                         continue;
                     }
+                    $nomor_e = isset( $e['nomor'] ) ? (int) $e['nomor'] : ( isset( $e['nomor_elemen'] ) ? (int) $e['nomor_elemen'] : ( $j + 1 ) );
+
                     $kuk_out = array();
-                    foreach ( (array) ( $e['kuk'] ?? array() ) as $k ) {
-                        $k = is_array( $k ) ? ( $k['teks'] ?? $k['text'] ?? '' ) : $k;
+                    $raw_kuk = isset( $e['kuk'] ) ? $e['kuk'] : array();
+                    if ( is_string( $raw_kuk ) ) {
+                        $raw_kuk = preg_split( '/\R/', $raw_kuk );
+                    }
+                    foreach ( (array) $raw_kuk as $k ) {
+                        if ( is_array( $k ) ) {
+                            $k_no = trim( (string) ( $k['nomor_kuk'] ?? '' ) );
+                            $k_ur = trim( (string) ( $k['uraian_kuk'] ?? $k['teks'] ?? $k['text'] ?? '' ) );
+                            $k    = trim( $k_no . ' ' . $k_ur );
+                        }
                         $k = trim( (string) $k );
                         if ( '' !== $k ) {
                             $kuk_out[] = $k;
@@ -4845,7 +4870,7 @@ class LSP_Core_Management {
                         $errors[] = 'JSON ' . $kode . ' elemen "' . $nama . '": KUK kosong.';
                     }
                     $elemen_out[] = array(
-                        'nomor' => isset( $e['nomor'] ) ? (int) $e['nomor'] : ( $j + 1 ),
+                        'nomor' => $nomor_e,
                         'nama'  => $nama,
                         'kuk'   => $kuk_out,
                     );
@@ -4853,7 +4878,13 @@ class LSP_Core_Management {
                 if ( empty( $elemen_out ) ) {
                     $errors[] = 'JSON ' . $kode . ': tidak ada elemen.';
                 }
-                $units[] = array( 'kode_unit' => $kode, 'judul_unit' => $judul, 'elemen' => $elemen_out );
+
+                $unit_out = array( 'kode_unit' => $kode, 'judul_unit' => $judul, 'elemen' => $elemen_out );
+                $deskripsi = trim( (string) ( $u['deskripsi_unit'] ?? $u['deskripsi'] ?? '' ) );
+                if ( '' !== $deskripsi ) {
+                    $unit_out['deskripsi_unit'] = $deskripsi;
+                }
+                $units[] = $unit_out;
             }
 
             return array( 'units' => $units, 'errors' => $errors );
@@ -4960,6 +4991,26 @@ class LSP_Core_Management {
         $skema_id = isset( $_POST['skema_id'] ) ? (int) $_POST['skema_id'] : 0;
         $dry_run  = ! empty( $_POST['dry_run'] );
         $raw      = isset( $_POST['skkni_text'] ) ? wp_unslash( $_POST['skkni_text'] ) : '';
+
+        // Berkas JSON/TXT dari SKKNI Extractor diprioritaskan bila diunggah.
+        if ( ! empty( $_FILES['skkni_file']['tmp_name'] ) && isset( $_FILES['skkni_file']['error'] ) && UPLOAD_ERR_OK === (int) $_FILES['skkni_file']['error'] ) {
+            $nama_berkas = sanitize_file_name( $_FILES['skkni_file']['name'] );
+            $ekstensi    = strtolower( pathinfo( $nama_berkas, PATHINFO_EXTENSION ) );
+            if ( ! in_array( $ekstensi, array( 'json', 'txt' ), true ) ) {
+                return array( 'type' => 'error', 'html' => 'Berkas harus berekstensi .json atau .txt.' );
+            }
+            if ( (int) $_FILES['skkni_file']['size'] > 5 * 1024 * 1024 ) {
+                return array( 'type' => 'error', 'html' => 'Berkas terlalu besar (maksimal 5 MB).' );
+            }
+            if ( ! is_uploaded_file( $_FILES['skkni_file']['tmp_name'] ) ) {
+                return array( 'type' => 'error', 'html' => 'Unggahan berkas tidak valid.' );
+            }
+            $isi = file_get_contents( $_FILES['skkni_file']['tmp_name'] );
+            if ( false === $isi || '' === trim( $isi ) ) {
+                return array( 'type' => 'error', 'html' => 'Berkas kosong atau tidak dapat dibaca.' );
+            }
+            $raw = $isi;
+        }
 
         if ( ! $skema_id || 'skema' !== get_post_type( $skema_id ) ) {
             return array( 'type' => 'error', 'html' => 'Skema tujuan tidak valid.' );
@@ -5098,7 +5149,7 @@ class LSP_Core_Management {
                 <strong>menimpa</strong> data skema tersebut. Gunakan <em>uji coba</em> dulu untuk memeriksa hasil parsing.
             </p>
 
-            <form method="post" style="max-width:900px;">
+            <form method="post" enctype="multipart/form-data" style="max-width:900px;">
                 <?php wp_nonce_field( 'lsp_skkni_import', 'lsp_skkni_import_nonce' ); ?>
                 <table class="form-table">
                     <tr>
@@ -5115,7 +5166,17 @@ class LSP_Core_Management {
                         </td>
                     </tr>
                     <tr>
-                        <th><label for="skkni_text">Data SKKNI</label></th>
+                        <th><label for="skkni_file">Berkas hasil ekstraksi</label></th>
+                        <td>
+                            <input type="file" name="skkni_file" id="skkni_file" accept=".json,.txt">
+                            <p class="description">
+                                Unggah berkas <code>.json</code> hasil <strong>SKKNI Extractor</strong> (satu unit atau array unit),
+                                atau <code>.txt</code> berformat baris. Bila berkas diunggah, isian teks di bawah diabaikan.
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><label for="skkni_text">atau tempel data SKKNI</label></th>
                         <td>
                             <textarea name="skkni_text" id="skkni_text" rows="16" style="width:100%;font-family:monospace;font-size:13px;" placeholder="UNIT: J.63OPR00.004.2 | Menggunakan Perangkat Lunak Pengolah Kata Tingkat Dasar&#10;ELEMEN: 1 | Membuat dokumen&#10;KUK: 1.1 Aplikasi pengolah kata dibuka.&#10;KUK: 1.2 Dokumen baru dibuat sesuai kebutuhan.&#10;ELEMEN: 2 | Menyimpan dokumen&#10;KUK: 2.1 Dokumen disimpan pada folder yang ditentukan."></textarea>
                             <p class="description">
